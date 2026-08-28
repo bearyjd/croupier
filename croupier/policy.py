@@ -38,10 +38,21 @@ class Policy:
     catalysts: CatalystCalendar = field(default_factory=CatalystCalendar.empty)
 
 
+class PolicyNotConfigured(FileNotFoundError):
+    """config/policy.yaml is missing. Deliberate: it is gitignored."""
+
+
 def load(policy_path: str | Path = DEFAULT_POLICY_PATH,
          state_path: str | Path = STATE_PATH,
          catalyst_path: str | Path = DEFAULT_CATALYST_PATH) -> Policy:
-    raw = yaml.safe_load(Path(policy_path).read_text()) or {}
+    p = Path(policy_path)
+    if not p.exists():
+        example = p.with_name(p.stem + ".example" + p.suffix)
+        raise PolicyNotConfigured(
+            f"{p} not found. It is gitignored on purpose — real budgets and "
+            f"restricted lists should not be committed to a public repository. "
+            f"Start from the worked example:\n\n    cp {example} {p}\n")
+    raw = yaml.safe_load(p.read_text()) or {}
     sleeves = {
         name: SleeveConfig(
             name=name,

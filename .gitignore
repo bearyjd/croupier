@@ -32,6 +32,13 @@ venv/
 .coverage
 htmlcov/
 
+# Live operating configuration. The tracked files are config/*.example.yaml;
+# copy them to config/policy.yaml and config/catalysts.yaml and edit those.
+# Real budgets, restricted lists and catalyst windows describe an operator's
+# position and belong in a private repository, not this one.
+config/policy.yaml
+config/catalysts.yaml
+
 # Live sleeve documents — an operator's watchlist, sizing and theses.
 # The format is documented in croupier/sleeves/README.md, which is tracked.
 croupier/sleeves/*.md

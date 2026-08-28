@@ -144,7 +144,7 @@ def test_no_calendar_means_no_freeze_and_no_crash():
 
 def test_shipped_calendar_template_is_wellformed():
     """The shipped file is a template; only its shape is guaranteed."""
-    cal = CatalystCalendar.load(REPO / "config" / "catalysts.yaml")
+    cal = CatalystCalendar.load(REPO / "config" / "catalysts.example.yaml")
     assert cal.freeze_trading_days == 5
     assert cal.events, "the template should carry one worked example"
     for e in cal.events:

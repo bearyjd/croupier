@@ -4,6 +4,8 @@
 import shutil
 from pathlib import Path
 
+import pytest
+
 from croupier import policy as policy_mod
 from croupier.gates.pipeline import check
 from croupier.models import AccountSnapshot, Mode, OrderIntent
@@ -13,8 +15,9 @@ REPO = Path(__file__).resolve().parent.parent
 
 def _workspace(tmp_path) -> Path:
     (tmp_path / "config").mkdir()
-    shutil.copy(REPO / "config" / "policy.yaml", tmp_path / "config" / "policy.yaml")
-    shutil.copy(REPO / "config" / "catalysts.yaml", tmp_path / "config" / "catalysts.yaml")
+    shutil.copy(REPO / "config" / "policy.example.yaml", tmp_path / "config" / "policy.yaml")
+    shutil.copy(REPO / "config" / "catalysts.example.yaml",
+                tmp_path / "config" / "catalysts.yaml")
     return tmp_path
 
 
@@ -63,3 +66,21 @@ def test_state_file_cannot_promote_a_halted_sleeve_through_the_loader(tmp_path):
 def test_load_is_the_only_loader_exported(tmp_path):
     """A second loader returning an unmerged PolicyConfig is the hazard."""
     assert not hasattr(policy_mod, "load_policy")
+
+
+def test_missing_policy_points_at_the_example(tmp_path):
+    """policy.yaml is gitignored, so its absence is expected, not a crash."""
+    with pytest.raises(policy_mod.PolicyNotConfigured) as exc:
+        policy_mod.load(tmp_path / "config" / "policy.yaml")
+    msg = str(exc.value)
+    assert "policy.example.yaml" in msg and "cp " in msg
+
+
+def test_shipped_example_is_a_working_starting_point(tmp_path):
+    """cp the example to the real name and everything loads."""
+    (tmp_path / "config").mkdir()
+    shutil.copy(REPO / "config" / "policy.example.yaml", tmp_path / "config" / "policy.yaml")
+    p = policy_mod.load(tmp_path / "config" / "policy.yaml",
+                        tmp_path / "data" / "sleeve_state.yaml",
+                        tmp_path / "config" / "catalysts.yaml")
+    assert p.config.sleeves and p.catalysts.events == ()   # no calendar yet is fine

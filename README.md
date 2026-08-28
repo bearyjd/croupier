@@ -12,7 +12,7 @@ AGPL-3.0 · Grepon Labs
 - `docs/prp/PRP-001` — architecture + invariants
 - `docs/prp/PRP-002` — broker topology (execution venue, data health)
 - `croupier/executor/AGENT.md` — the agent's operating contract
-- `config/policy.yaml` — enforced limits (YAML wins over sleeve prose)
+- `config/policy.example.yaml` — enforced limits (YAML wins over sleeve prose)
 - `croupier/sleeves/README.md` — the sleeve format
 
 ## Compliance-by-design
@@ -23,8 +23,9 @@ fact, that every trade derived from public information. Populate the
 denylist with counsel before the first live trade.
 
 **Live operating configuration is not tracked here.** Sleeve documents
-(`croupier/sleeves/*.md`) are gitignored, and the shipped
-`config/catalysts.yaml` is a fictional template. A real watchlist, sizing,
+(`croupier/sleeves/*.md`) and the live `config/policy.yaml` /
+`config/catalysts.yaml` are gitignored; the repository ships only
+`.example.yaml` templates with fictional tickers. A real watchlist, sizing,
 or restricted list belongs in a private repository — PRP-001 asks for the
 denylist to be *versioned*, which is not the same as public.
 
@@ -38,7 +39,16 @@ distro Pythons are marked externally-managed and will refuse a bare
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"      # drop [dev] for runtime only
+
+cp config/policy.example.yaml    config/policy.yaml
+cp config/catalysts.example.yaml config/catalysts.yaml
 ```
+
+`config/policy.yaml` and `config/catalysts.yaml` are **gitignored**; only the
+`.example.yaml` files are tracked. Your real budgets, restricted list, and
+catalyst windows describe your position — they should not land in a public
+repository. `croupier` tells you to run the `cp` above if the file is
+missing rather than failing with a bare file-not-found.
 
 Requires Python ≥ 3.12. Runtime deps: `pyyaml`, `httpx`. Dev adds `pytest`
 and `ruff`.

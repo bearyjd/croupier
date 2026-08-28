@@ -18,7 +18,8 @@ REPO = Path(__file__).resolve().parent.parent
 def workspace(tmp_path, monkeypatch):
     """A throwaway CWD with a real policy.yaml, so data/ lands in tmp_path."""
     (tmp_path / "config").mkdir()
-    shutil.copy(REPO / "config" / "policy.yaml", tmp_path / "config" / "policy.yaml")
+    shutil.copy(REPO / "config" / "policy.example.yaml",
+                tmp_path / "config" / "policy.yaml")
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -116,7 +117,8 @@ def test_mark_halts_the_sleeve_and_the_next_check_is_rejected(
 
 def test_check_carries_the_catalyst_freeze_gate(workspace, monkeypatch, capsys):
     """The shipped calendar is wired into `croupier check`, freeze or not."""
-    shutil.copy(REPO / "config" / "catalysts.yaml", workspace / "config" / "catalysts.yaml")
+    shutil.copy(REPO / "config" / "catalysts.example.yaml",
+                workspace / "config" / "catalysts.yaml")
     _, verdict = _run(monkeypatch, capsys, ["check"], _order())
     assert any(d["gate"] == "catalyst_freeze" for d in verdict["decisions"])
 
