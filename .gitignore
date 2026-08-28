@@ -1,0 +1,42 @@
+# Runtime state — never committed (positions, tokens, audit trail, journals).
+# Anchored with a leading slash: an unanchored 'data/' would also swallow
+# the croupier/data/ package.
+/data/
+!/data/seed/
+
+# Broker credentials / tokens — NEVER commit
+*token*.json
+*tokens*.json
+.env
+.env.*
+!.env.example
+
+# Scaffolds / archives
+*.tar.gz
+*.tgz
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Live sleeve documents — an operator's watchlist, sizing and theses.
+# The format is documented in croupier/sleeves/README.md, which is tracked.
+croupier/sleeves/*.md
+!croupier/sleeves/README.md
+
+# Agent tooling state (oh-my-claudecode)
+.omc/
+.claude/settings.local.json

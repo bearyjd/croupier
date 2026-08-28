@@ -1,0 +1,23 @@
+{
+  "sleeve": "event_driven",
+  "ticker": "ACME",
+  "side": "buy",
+  "qty": 1000,
+  "limit_price": 2.80,
+  "signal_refs": [
+    "8-K 0001234567-26-000042",
+    "https://www.sec.gov/Archives/edgar/data/1announcement.htm"
+  ],
+  "thesis": "Example: entry near the last institutional financing price",
+  "is_etf": false,
+  "venue": "robinhood",
+  "adv_shares": 850000,
+  "data_health": "fresh",
+  "auto_spent_today": 0.0,
+  "account": {
+    "total_value": 100000.0,
+    "cash": 50000.0,
+    "sleeve_cost_basis": { "event_driven": 0.0 },
+    "position_cost_basis": {}
+  }
+}

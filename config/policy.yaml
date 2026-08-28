@@ -1,0 +1,41 @@
+# Croupier policy — YAML wins over sleeve prose (PRP-001).
+# Shipped as a worked example. An operator's real budgets and restricted
+# list belong in a private repository; see croupier/sleeves/README.md.
+sleeves:
+  event_driven:
+    budget_pct: 10          # SLEEVE_MAX, mirrored from the sleeve doc
+    position_max_pct: 3     # POSITION_MAX
+    mode: confirm
+  filature:
+    budget_pct: 0           # sim-only until PRP-002 horse race concludes
+    position_max_pct: 0
+    mode: halted
+
+# Restricted-list denylist — REVIEW WITH COUNSEL BEFORE FIRST LIVE TRADE.
+# Deny wins over every other gate. Git history of this file is part of the
+# audit trail: annotate changes in commit messages.
+denylist: {}          # ticker: no_trade | etf_only
+sector_denylist: {}   # sector: no_trade | etf_only
+  # Populate after reviewing the operator's restrictions, e.g.:
+  # defense: etf_only
+  # restricted_names: no_trade
+
+ticker_sector: {}     # populated from shared sector CSV (Filature reuse)
+
+min_price_for_market_orders: 10.0
+min_adv_shares: 1000000
+
+# Per-sleeve drawdown ceiling, mirrored from the sleeve doc. When a
+# sleeve's time-weighted drawdown from its high-water mark exceeds this,
+# `croupier mark` writes a HALT into data/sleeve_state.yaml, which is
+# merged over this file. Only a human clears it.
+max_sleeve_drawdown_pct: 25
+
+# PRP-002 broker topology
+execution_venue: robinhood     # the ONLY venue the venue gate approves
+brokers:
+  robinhood:
+    role: execution            # Agentic Account, funded with sleeve capital only
+  schwab:
+    role: data_only            # Market Data product ONLY — never enable trading
+    token_path: data/schwab_tokens.json

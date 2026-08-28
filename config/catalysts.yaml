@@ -1,0 +1,33 @@
+# Croupier catalyst calendar — binary event windows and the pre-readout freeze.
+#
+# Effect of a listed window: from T-`freeze_trading_days` trading days before
+# window_start, through window_end, a BUY in that ticker requires human
+# confirmation regardless of its sleeve's mode. It never lowers a confirm
+# requirement, and it never gates sells — an exit into a catalyst does not
+# need this calendar's permission.
+#
+# PUBLIC SOURCES ONLY. `source_url` must point at something anyone can read:
+# an SEC filing, an EDGAR search, a company IR page, an FDA calendar entry.
+# Never a private note, a conversation, or a terminal you pay for.
+#
+# `verified: false` means the window was transcribed from prose (a strategy
+# document, a press mention) rather than read off a filing. Unverified
+# entries still freeze — erring toward asking a human is the safe direction.
+# Confirm against the source and flip the flag before relying on one.
+#
+# The entry below is a FICTIONAL EXAMPLE showing the schema. Replace it with
+# your own; an operator's real catalyst calendar is better kept in a private
+# repository.
+
+freeze_trading_days: 5
+
+events:
+  - ticker: ACME
+    event_type: phase_data_readout
+    note: >-
+      Fictional example. Real entries name the specific readout and where the
+      window came from.
+    window_start: 2099-10-01
+    window_end: 2099-12-31
+    source_url: https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=ACME&type=8-K
+    verified: false
