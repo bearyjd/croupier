@@ -115,3 +115,18 @@ def test_degraded_allows_confirm_buys_with_flag():
 def test_dead_data_rejects_everything():
     assert not check(_intent(side="sell"), _cfg(), _snap(),
                      data_health=DataHealth.DEAD).approved
+
+
+def test_intent_naming_an_unknown_sleeve_is_rejected():
+    """A typo in `sleeve` must not fall through to an unbudgeted approval."""
+    v = check(_intent(sleeve="does_not_exist"), _cfg(), _snap())
+    assert not v.approved and v.approval_id is None
+    reasons = " ".join(v.rejection_reasons)
+    assert "unknown sleeve" in reasons
+    assert any(d.gate == "sleeve_budget" and not d.passed for d in v.decisions)
+    assert any(d.gate == "mode" and not d.passed for d in v.decisions)
+
+
+def test_unknown_sleeve_does_not_require_confirm_because_it_is_not_approved():
+    v = check(_intent(sleeve="does_not_exist"), _cfg(), _snap())
+    assert v.requires_confirm is False and v.approved is False

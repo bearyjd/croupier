@@ -111,3 +111,34 @@ async def test_already_halted_sleeve_is_not_rehalted(led, fake_router, tmp_path,
     (m,) = result.marks
     assert m.halted_now is False                       # no duplicate halt event
     assert result.state.halts[SLEEVE].reason == "earlier halt"   # original reason kept
+
+
+async def test_a_raising_data_source_does_not_raise_into_the_marking_path(
+        led, tmp_path, monkeypatch):
+    """PRP-002: market data must never raise into a trading path."""
+    monkeypatch.chdir(tmp_path)
+
+    class Exploding:
+        name = "exploding"
+
+        def health(self):
+            return DataHealth.FRESH
+
+        async def quote(self, ticker):
+            raise RuntimeError("upstream on fire")
+
+    from croupier.data.router import DataRouter
+    router = DataRouter(Exploding(), Exploding())
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    result = await mark_to_market(led, router, SleeveState.empty(),
+                                  max_drawdown_pct=25.0, as_of=D1)
+    (m,) = result.marks
+    assert m.unpriced == ("ACME",)
+    assert m.market_value == pytest.approx(2800.0)   # carried at cost
+    assert m.halted_now is False
+
+
+def test_router_reports_dead_when_every_source_is_dead(fake_router):
+    """The floor beneath DEGRADED: nothing trades without human instruction."""
+    assert fake_router({}, DataHealth.DEAD).health() == DataHealth.DEAD
+    assert fake_router({"ACME": 1.0}, DataHealth.FRESH).health() == DataHealth.FRESH

@@ -19,7 +19,7 @@ from croupier.audit import AuditLog
 from croupier.data.base import DataHealth, Quote
 from croupier.data.router import DataRouter
 from croupier.drawdown import EquityPoint, advance
-from croupier.ledger import Ledger, Position
+from croupier.ledger import Ledger
 from croupier.models import utcnow
 from croupier.state import Halt, SleeveState
 
@@ -129,9 +129,3 @@ async def _quote_all(router: DataRouter, tickers: set[str]) -> dict[str, Quote |
             out[ticker] = None
     return out
 
-
-def positions_by_sleeve(positions: list[Position]) -> dict[str, list[Position]]:
-    grouped: dict[str, list[Position]] = {}
-    for p in positions:
-        grouped = {**grouped, p.sleeve: [*grouped.get(p.sleeve, []), p]}
-    return grouped
