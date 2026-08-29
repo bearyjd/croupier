@@ -15,6 +15,18 @@ AGPL-3.0 · Grepon Labs
 - `config/policy.example.yaml` — enforced limits (YAML wins over sleeve prose)
 - `croupier/sleeves/README.md` — the sleeve format
 
+Croupier is a **policy engine, not a trading agent**. It holds no broker
+credentials and places nothing. The agent connects to its broker itself and
+is bound to pass every proposed order through `croupier check` first, placing
+only what comes back approved and recording the `approval_id`.
+
+A sleeve's *signal source* is deliberately outside Croupier. One sleeve's
+source might be a human reading filings; another's might be a separate
+service emitting intents on a schedule. Croupier does not care which — it
+requires only that an order carry citable `signal_refs` and pass every gate.
+Keeping signal generation out is what lets the engine stay two dependencies
+deep and auditable line by line.
+
 ## Compliance-by-design
 All signals must be public and cited (`signal_refs` is mandatory at the type
 level — an intent without provenance cannot be constructed). The denylist
