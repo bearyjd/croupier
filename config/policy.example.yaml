@@ -20,7 +20,15 @@ sector_denylist: {}   # sector: no_trade | etf_only
   # defense: etf_only
   # restricted_names: no_trade
 
-ticker_sector: {}     # populated from shared sector CSV (Filature reuse)
+# Bulk ticker -> sector map. Point this at a generated seed CSV (header row,
+# then `ticker,sector`); the sector denylist can only act on tickers it knows.
+# A missing file is not fatal — it degrades the sector denylist to the inline
+# entries below and leaves every other gate untouched.
+# ticker_sector_csv: data/seed/ticker_sector.csv
+
+# Inline overrides. These win over the CSV: a hand-curated mapping is a
+# deliberate act and should outrank a generated file.
+ticker_sector: {}
 
 min_price_for_market_orders: 10.0
 min_adv_shares: 1000000

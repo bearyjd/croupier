@@ -20,6 +20,7 @@ import yaml
 from croupier.catalysts import DEFAULT_CATALYST_PATH, CatalystCalendar
 from croupier.gates.pipeline import PolicyConfig, SleeveConfig
 from croupier.models import DenyLevel, Mode
+from croupier.sectors import load_ticker_sector_csv
 from croupier.state import STATE_PATH, SleeveState, merge_halts
 
 DEFAULT_POLICY_PATH = Path("config/policy.yaml")
@@ -68,7 +69,13 @@ def load(policy_path: str | Path = DEFAULT_POLICY_PATH,
         sleeves=sleeves,
         denylist={k.upper(): DenyLevel(v) for k, v in (raw.get("denylist") or {}).items()},
         sector_denylist={k: DenyLevel(v) for k, v in (raw.get("sector_denylist") or {}).items()},
-        ticker_sector={k.upper(): v for k, v in (raw.get("ticker_sector") or {}).items()},
+        # Bulk seed first, then inline entries — a hand-curated mapping in
+        # policy.yaml is a deliberate act and outranks the generated file.
+        ticker_sector={
+            **(load_ticker_sector_csv(raw["ticker_sector_csv"])
+               if raw.get("ticker_sector_csv") else {}),
+            **{k.upper(): v for k, v in (raw.get("ticker_sector") or {}).items()},
+        },
         min_price_for_market_orders=raw.get("min_price_for_market_orders", 10.0),
         min_adv_shares=raw.get("min_adv_shares", 1_000_000),
         execution_venue=raw.get("execution_venue", "robinhood"),
