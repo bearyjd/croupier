@@ -15,7 +15,7 @@ from croupier.journal import JournalReport, PendingConfirm, SleeveLine
 _HEALTH_BANNER = {
     DataHealth.FRESH: None,
     DataHealth.DEGRADED: (
-        "**DEGRADED DATA** — Schwab feed unavailable, Stooq EOD fallback in "
+        "**DEGRADED DATA** — Schwab feed unavailable, EOD fallback in "
         "use. No new AUTO entries; exits still run and are flagged."),
     DataHealth.DEAD: (
         "**DEAD DATA** — no market data source available. Place nothing "

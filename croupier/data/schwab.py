@@ -74,7 +74,7 @@ class SchwabMarketData:
     def health(self) -> DataHealth:
         now = datetime.now(UTC)
         if self._tokens is None or now >= self._tokens.refresh_expires_at:
-            return DataHealth.DEAD  # router falls through to stooq -> DEGRADED overall
+            return DataHealth.DEAD  # router falls through to the EOD floor
         return DataHealth.FRESH
 
     async def _ensure_access(self, client: httpx.AsyncClient) -> bool:
