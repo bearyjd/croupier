@@ -27,9 +27,33 @@
      exits over a catalyst weekend — degraded exits beat no exits.
    - CONFIRM-mode orders surface the data-health status in the report so
      the human decides with eyes open.
-3. **Fallback is always available.** Stooq EOD (free, no auth) is the
-   floor: the system can always mark positions daily even with zero broker
-   data connectivity.
+3. **The floor is observed, not assumed.** Stooq EOD (free, no auth) is the
+   fallback beneath the Schwab feed, but its availability is a fact about a
+   third party and must be measured rather than asserted.
+
+   This invariant originally read "Fallback is always available… the system
+   can always mark positions daily". On 2026-08-29 that stopped being true:
+   Stooq began refusing plain HTTP clients, answering with HTML rather than
+   CSV — a 404 to a bare client, or a 200 carrying a JavaScript proof-of-work
+   page to a browser-shaped one. Neither is an error, so every quote returned
+   None while the adapter still reported DEGRADED.
+
+   That combination is worse than an outage, because DEGRADED and DEAD mean
+   different things here. DEGRADED permits exits on EOD prices; DEAD permits
+   nothing without explicit human instruction. A source that can price nothing
+   while reporting DEGRADED invites exits against prices that do not exist,
+   carries every position at cost so the drawdown halt cannot fire, and prints
+   a reassuring banner in the journal while doing it.
+
+   `StooqMarketData.health()` therefore reports what it has observed: DEGRADED
+   until a fetch fails, DEAD thereafter, DEGRADED again once one succeeds. A
+   well-formed but empty series is not a refusal — the source answered.
+
+   **Consequence for planning:** there is currently no working free EOD floor
+   for this host or for Core/.20, both of which Stooq refuses. Choosing a
+   replacement is an amendment to PRP-001 invariant 4 ("free sources only",
+   which admits several alternatives) and a deployment decision if the
+   replacement needs an API key.
 
 ## Components
 
