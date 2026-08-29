@@ -229,6 +229,26 @@ keep the host out of the repo and export it from the cron environment or a
 gitignored env file, so the journal's contents and your endpoint never end
 up in version control together.
 
+### Sector map
+
+The sector denylist can only act on tickers it can place in a sector, so the
+bulk map lives in a CSV rather than inline YAML:
+
+```yaml
+ticker_sector_csv: data/seed/ticker_sector.csv   # header row, then ticker,sector
+ticker_sector:
+  ACME: defense                                  # inline entries win over the CSV
+```
+
+Inline entries outrank the file on purpose — a hand-curated mapping is a
+deliberate act and should beat a generated one. A missing or malformed CSV is
+logged and treated as empty rather than raised: it degrades the *sector*
+denylist to whatever is listed inline and leaves the per-ticker denylist and
+every other gate untouched.
+
+The same CSV is generated and consumed by the Filature sister project, so a
+wrong mapping is fixed in one place.
+
 ### Catalyst freezes
 
 `config/catalysts.yaml` lists binary event windows: ticker, event type,
