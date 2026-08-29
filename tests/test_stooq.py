@@ -76,3 +76,69 @@ async def test_bad_responses_return_none_rather_than_raising(mock_http, status, 
 async def test_health_is_always_degraded():
     """Stooq is EOD by definition; it is never the FRESH source."""
     assert StooqMarketData().health() == DataHealth.DEGRADED
+
+
+# --- the floor is observed, not assumed (PRP-002 inv. 3) --------------------
+
+async def test_a_refusal_routes_dead_not_degraded(mock_http):
+    """The distinction decides whether exits run.
+
+    Stooq answers a refused client with HTML and a 200 or a 404, never an
+    error. health() used to return DEGRADED unconditionally, which under
+    PRP-002 means "exits proceed on EOD prices" — against prices that do not
+    exist, with every position carried at cost so the drawdown halt could
+    never fire, and a reassuring DEGRADED banner in the journal.
+    """
+    mock_http(_responds(404, "<meta charset=utf-8><title>Stooq</title>gone"))
+    feed = StooqMarketData()
+    assert feed.health() == DataHealth.DEGRADED       # not yet asked
+    assert await feed.quote("SPY") is None
+    assert feed.health() == DataHealth.DEAD
+
+
+async def test_a_proof_of_work_page_also_routes_dead(mock_http):
+    """The other shape of the same refusal, served to a browser-like client."""
+    mock_http(_responds(200, "<!DOCTYPE html>This site requires JavaScript"))
+    feed = StooqMarketData()
+    await feed.quote("SPY")
+    assert feed.health() == DataHealth.DEAD
+
+
+async def test_the_router_floor_goes_dead_with_it(mock_http):
+    from croupier.data.router import DataRouter
+    mock_http(_responds(404, "<html>nope</html>"))
+    feed = StooqMarketData()
+    router = DataRouter(None, feed)
+    await feed.quote("SPY")
+    assert router.health() == DataHealth.DEAD
+
+
+async def test_a_working_feed_stays_degraded_and_recovers(mock_http):
+    """DEGRADED is the healthy state here — Stooq is end-of-day by definition,
+    so it is a floor, never FRESH."""
+    mock_http(_responds())
+    feed = StooqMarketData()
+    assert await feed.quote("ACME") is not None
+    assert feed.health() == DataHealth.DEGRADED
+
+
+async def test_an_empty_series_is_not_a_refusal(mock_http):
+    """Well-formed CSV with no rows means this ticker has no data — the source
+    is answering. Marking it DEAD would take the whole floor down over one
+    delisted name."""
+    mock_http(_responds(200, "Date,Open,High,Low,Close,Volume\n"))
+    feed = StooqMarketData()
+    assert await feed.quote("DELISTED") is None
+    assert feed.health() == DataHealth.DEGRADED
+
+
+async def test_a_transport_error_routes_dead(mock_http):
+    import httpx as _httpx
+
+    def _boom(request):
+        raise _httpx.ConnectError("no route to host")
+
+    mock_http(_boom)
+    feed = StooqMarketData()
+    assert await feed.quote("SPY") is None            # never raises into trading
+    assert feed.health() == DataHealth.DEAD
