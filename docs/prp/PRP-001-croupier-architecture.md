@@ -54,10 +54,21 @@ strategy sleeves -> OrderIntent -> GATE PIPELINE -> APPROVED/REJECTED (+audit)
 ## Sleeve format
 
 Each sleeve = one markdown doc (see `croupier/sleeves/README.md`) + one
-YAML config entry (budget, mode, caps) + optionally a signal module (as in
-Filature/PRP-002). The doc is the agent's operating instructions; the YAML
-is what Croupier enforces. Where doc and YAML disagree, YAML wins — prose
-cannot loosen code. Live sleeve docs are gitignored.
+YAML config entry (budget, mode, caps). The doc is the agent's operating
+instructions; the YAML is what Croupier enforces. Where doc and YAML
+disagree, YAML wins — prose cannot loosen code. Live sleeve docs are
+gitignored.
+
+**A sleeve's signal source is out of scope, on purpose.** One sleeve's
+source may be a human reading filings; another's may be a separate service
+that emits intents on a schedule. Croupier does not know or care which — it
+only requires that an order arrive with citable `signal_refs` (invariant 2)
+and survive every gate. That indifference is what keeps the policy engine
+small: it runs on two dependencies and can be audited line by line, which
+would stop being true if it also had to host scrapers, parsers and a
+database. A signal service that needs those lives in its own repository and
+reaches Croupier through a thin adapter; the sleeve is the config entry plus
+that adapter, not the service behind it.
 
 ## Compliance-by-design (non-negotiable)
 
