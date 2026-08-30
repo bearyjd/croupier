@@ -27,6 +27,7 @@ even when it is working perfectly.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 
@@ -39,18 +40,27 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://api.twelvedata.com/time_series"
 INTERVAL = "1day"
 SYMBOL_NOT_FOUND = 404
+RATE_LIMITED = 429
+# The free tier's 8-requests-a-minute ceiling is a rolling window the whole key
+# shares, and this key is shared with the signal sidecar that fills the same
+# sleeve. A backfill running there can rate-limit a mark running here through
+# no fault of its own, and a per-minute 429 clears by waiting. Without this,
+# that transient would route the floor DEAD and halt exits for an hour.
+RATE_LIMIT_BACKOFF_S = 61.0
 
 
 class TwelveDataMarketData:
     name = "twelvedata"
 
-    def __init__(self, api_key: str, timeout: float = 30.0) -> None:
+    def __init__(self, api_key: str, timeout: float = 30.0,
+                 backoff_s: float = RATE_LIMIT_BACKOFF_S) -> None:
         if not api_key:
             # A missing key is a deployment fault and is raised where it can be
             # fixed. It must never become a source that answers "no data".
             raise ValueError("TWELVEDATA_API_KEY is required")
         self._key = api_key
         self._timeout = timeout
+        self._backoff_s = backoff_s
         self._reachable = True
 
     def health(self) -> DataHealth:
@@ -67,9 +77,12 @@ class TwelveDataMarketData:
             "format": "JSON",
         }
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.get(BASE_URL, params=params)
-            payload = resp.json()
+            payload = await self._get(params)
+            if _rate_limited(payload):
+                log.warning("twelvedata rate-limited on %s; waiting %.0fs",
+                            ticker, self._backoff_s)
+                await asyncio.sleep(self._backoff_s)
+                payload = await self._get(params)
         except httpx.HTTPError as exc:
             # Market data never raises into a trading path (PRP-002).
             self._mark_unreachable(f"request failed: {exc}")
@@ -116,6 +129,11 @@ class TwelveDataMarketData:
                      as_of=as_of.replace(tzinfo=UTC),
                      source=self.name, health=DataHealth.DEGRADED)
 
+    async def _get(self, params: dict[str, str]) -> dict:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.get(BASE_URL, params=params)
+        return resp.json()
+
     def _mark_unreachable(self, why: str) -> None:
         if self._reachable:
             log.warning("twelvedata is not serving data (%s); routing DEAD "
@@ -124,12 +142,19 @@ class TwelveDataMarketData:
         self._reachable = False
 
 
-def _resolve(ticker: str) -> str:
-    """Filed ticker -> quoted ticker.
+def _rate_limited(payload: dict) -> bool:
+    return payload.get("status") == "error" and payload.get("code") == RATE_LIMITED
 
-    A dot never appears in a bare US ticker; it only ever separates a class
-    suffix, which this feed spells with a dash (BRK.B -> BRK-B). Croupier sees
-    tickers from sleeve configs rather than from disclosures, so it needs the
-    punctuation rule but not Filature's rename map.
+
+def _resolve(ticker: str) -> str:
+    """Config ticker -> quoted ticker.
+
+    Punctuation is left exactly as configured. Symbol spelling belongs to the
+    feed rather than to the security, and an earlier version of this rewrote
+    dots to dashes because that is how Yahoo spells class shares — verified
+    while Yahoo was still a candidate, and wrong here. Twelve Data quotes
+    Berkshire class B as `BRK.B`, so the rewrite turned a symbol that worked
+    into a 404. Confirmed against a live key: `BRK.B` and `UHAL.B` serve,
+    `BRK-B` and `UHAL-B` do not.
     """
-    return ticker.strip().upper().replace(".", "-")
+    return ticker.strip().upper()

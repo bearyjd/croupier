@@ -65,9 +65,11 @@ async def test_quote_takes_the_newest_row(mock_http):
     assert q.as_of.tzinfo is not None               # never naive
 
 
-async def test_class_shares_are_spelled_the_way_the_feed_wants(mock_http):
-    """A dot never appears in a bare US ticker; it separates a class suffix,
-    and this feed spells that with a dash."""
+async def test_class_share_punctuation_is_left_alone(mock_http):
+    """Symbol spelling belongs to the feed, not to the security. Yahoo wants
+    `BRK-B`; this feed wants `BRK.B`, verified against a live key. Rewriting
+    the dot — as an earlier version did, from a Yahoo-verified rule — turned a
+    working symbol into a 404."""
     seen = {}
 
     def handler(request):
@@ -76,7 +78,7 @@ async def test_class_shares_are_spelled_the_way_the_feed_wants(mock_http):
 
     mock_http(handler)
     await _feed().quote("brk.b")
-    assert seen["symbol"] == "BRK-B"
+    assert seen["symbol"] == "BRK.B"
 
 
 async def test_marking_asks_for_one_bar_not_a_history(mock_http):
@@ -124,7 +126,8 @@ async def test_a_refusal_routes_dead_not_degraded(mock_http):
     assert feed.health() == DataHealth.DEAD
 
 
-@pytest.mark.parametrize("code", [429, 500, 403, 999])
+# 429 is deliberately absent: it is retried, and has its own tests below.
+@pytest.mark.parametrize("code", [500, 403, 999])
 async def test_an_unrecognised_error_also_routes_dead(mock_http, code):
     """Quota exhaustion, an outage, or a code we have never seen all mean we
     know nothing. Guessing 'no data' instead is what let a dead feed look
@@ -195,6 +198,36 @@ async def test_a_dead_feed_recovers_when_it_answers_again(mock_http):
     refusing = False
     assert await feed.quote("ACME") is not None
     assert feed.health() == DataHealth.DEGRADED
+
+
+async def test_a_per_minute_rate_limit_is_waited_out_not_surrendered_to(mock_http):
+    """This key is shared with the sidecar that fills the same sleeve. A
+    backfill there can rate-limit a mark here; routing the floor DEAD over a
+    transient that clears in a minute would halt exits for an hour."""
+    limited = True
+
+    def handler(request):
+        nonlocal limited
+        if limited:
+            limited = False
+            return httpx.Response(429, json={"code": 429, "status": "error",
+                                             "message": "out of API credits "
+                                                        "for the current minute"})
+        return httpx.Response(200, json=OK)
+
+    mock_http(handler)
+    feed = TwelveDataMarketData("test-key", backoff_s=0)
+    assert await feed.quote("ACME") is not None
+    assert feed.health() == DataHealth.DEGRADED
+
+
+async def test_a_rate_limit_that_does_not_clear_still_routes_dead(mock_http):
+    """The daily ceiling does not clear by waiting."""
+    mock_http(_responds(429, {"code": 429, "status": "error",
+                              "message": "out of API credits"}))
+    feed = TwelveDataMarketData("test-key", backoff_s=0)
+    assert await feed.quote("ACME") is None
+    assert feed.health() == DataHealth.DEAD
 
 
 async def test_the_router_floor_goes_dead_with_it(mock_http):
