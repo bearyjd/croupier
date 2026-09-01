@@ -6,11 +6,10 @@ from datetime import UTC, date, datetime
 import pytest
 
 from croupier.audit import AuditLog
-from croupier.data.base import DataHealth
+from croupier.data.base import DataHealth, Quote
 from croupier.ledger import Fill, Ledger
 from croupier.marking import mark_to_market
 from croupier.state import SleeveState
-from tests.conftest import FakeMarketData
 
 SLEEVE = "event_driven"
 D1, D2 = date(2026, 8, 26), date(2026, 8, 27)
@@ -157,8 +156,23 @@ async def test_mark_persists_what_it_observed(led, tmp_path, monkeypatch):
     from croupier.data import observed_health
     from croupier.data.router import DataRouter
 
+    class _DegradedFeed:
+        """No cross-module import needed: `fake_router`'s fallback is fixed
+        at DEAD, and no real primary (Schwab) ever reports DEGRADED itself —
+        only FRESH or DEAD — so a DEGRADED overall router needs a
+        purpose-built fallback, not the shared fixture."""
+        name = "fake"
+
+        def health(self):
+            return DataHealth.DEGRADED
+
+        async def quote(self, ticker):
+            return Quote(ticker=ticker.upper(), price=3.20,
+                        as_of=datetime(D1.year, D1.month, D1.day, tzinfo=UTC),
+                        source="fake", health=DataHealth.DEGRADED)
+
     monkeypatch.chdir(tmp_path)
-    router = DataRouter(None, FakeMarketData({"ACME": 3.20}, DataHealth.DEGRADED))
+    router = DataRouter(None, _DegradedFeed())
     _fill(led, "a1", "buy", 1000, 2.80, D1)
     await mark_to_market(led, router, SleeveState.empty(),
                          max_drawdown_pct=25.0, as_of=D1)
