@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from croupier import cli
+from croupier.data.base import DataHealth
 from croupier.ledger import Ledger
 
 REPO = Path(__file__).resolve().parent.parent
@@ -158,3 +159,34 @@ def test_journal_shows_an_active_freeze(workspace, monkeypatch, capsys):
     assert "## Catalyst freezes (1)" in text and "**ACME**" in text
     written = (workspace / "data" / "journal").glob("*.md")
     assert "Catalyst freezes (1)" in next(written).read_text()
+
+
+def test_journal_reads_the_last_observed_health_not_an_unqueried_router(
+        workspace, monkeypatch, capsys):
+    """The bug only shows with a key configured: build_router() then
+    constructs a real TwelveDataMarketData fallback, whose health() defaults
+    to DEGRADED before any query -- optimistic by construction. cmd_journal
+    used to call .health() on that fresh instance immediately; it must read
+    what `mark` actually observed instead. With no key at all, build_router()
+    returns DataRouter(None, None), which reports DEAD either way -- that
+    case would pass against the old, buggy code too, so it proves nothing."""
+    from croupier.data import observed_health
+
+    monkeypatch.setenv("TWELVEDATA_API_KEY", "unused-in-this-test")
+    observed_health.save(DataHealth.DEAD)
+    cli.main(["journal"])
+    text = capsys.readouterr().out
+    assert "data feed: `dead`" in text
+    assert "DEAD DATA" in text
+
+
+def test_journal_with_no_prior_mark_reports_dead_not_a_comfortable_degraded(
+        workspace, monkeypatch, capsys):
+    """Never observed must not default to DEGRADED, which is itself a claim
+    of having checked. With a key configured but no prior `mark`, the old
+    code constructed a fresh adapter and reported DEGRADED without ever
+    asking it anything."""
+    monkeypatch.setenv("TWELVEDATA_API_KEY", "unused-in-this-test")
+    cli.main(["journal"])
+    text = capsys.readouterr().out
+    assert "data feed: `dead`" in text
