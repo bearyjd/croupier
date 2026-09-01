@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import UTC, datetime
 
 import httpx
@@ -48,12 +49,21 @@ RATE_LIMITED = 429
 # that transient would route the floor DEAD and halt exits for an hour.
 RATE_LIMIT_BACKOFF_S = 61.0
 
+# marking.py quotes one ticker at a time with no batching, so any sleeve past
+# 8 open positions hits the ceiling above in the ordinary case, not a rare
+# one — and the reactive 61s backoff then fires roughly once per 8 tickers.
+# Pacing every call ahead of the limit turns that into a steady, predictable
+# 8s/ticker instead of long silent stalls. 8.0s rather than the 7.5s that
+# exactly saturates 8/minute, for the same shared-key margin as above.
+MIN_INTERVAL_S = 8.0
+
 
 class TwelveDataMarketData:
     name = "twelvedata"
 
     def __init__(self, api_key: str, timeout: float = 30.0,
-                 backoff_s: float = RATE_LIMIT_BACKOFF_S) -> None:
+                 backoff_s: float = RATE_LIMIT_BACKOFF_S,
+                 min_interval_s: float = MIN_INTERVAL_S) -> None:
         if not api_key:
             # A missing key is a deployment fault and is raised where it can be
             # fixed. It must never become a source that answers "no data".
@@ -62,12 +72,15 @@ class TwelveDataMarketData:
         self._timeout = timeout
         self._backoff_s = backoff_s
         self._reachable = True
+        self._last_call = 0.0
+        self._min_interval_s = min_interval_s
 
     def health(self) -> DataHealth:
         """DEGRADED while this source can serve, DEAD once it cannot."""
         return DataHealth.DEGRADED if self._reachable else DataHealth.DEAD
 
     async def quote(self, ticker: str) -> Quote | None:
+        await self._pace()
         # Marking needs the latest bar, not a history: one credit per ticker.
         params = {
             "symbol": _resolve(ticker),
@@ -78,11 +91,23 @@ class TwelveDataMarketData:
         }
         try:
             payload = await self._get(params)
+            if not isinstance(payload, dict):
+                # Anything between us and the vendor — a CDN error page, a WAF
+                # block, a proxy timeout body — can return JSON that isn't the
+                # vendor's own shape. The file's promise above is unconditional
+                # ("never raises into a trading path"), so this has to be
+                # checked before a single `.get()` call assumes a dict.
+                raise ValueError(
+                    f"expected a JSON object, got {type(payload).__name__}")
             if _rate_limited(payload):
                 log.warning("twelvedata rate-limited on %s; waiting %.0fs",
                             ticker, self._backoff_s)
                 await asyncio.sleep(self._backoff_s)
                 payload = await self._get(params)
+                if not isinstance(payload, dict):
+                    raise ValueError(
+                        f"expected a JSON object after retry, got "
+                        f"{type(payload).__name__}")
         except httpx.HTTPError as exc:
             # Market data never raises into a trading path (PRP-002).
             self._mark_unreachable(f"request failed: {exc}")
@@ -137,6 +162,19 @@ class TwelveDataMarketData:
         return Quote(ticker=ticker, price=price,
                      as_of=as_of.replace(tzinfo=UTC),
                      source=self.name, health=DataHealth.DEGRADED)
+
+    async def _pace(self) -> None:
+        """Wait out whatever is left of the per-request floor before calling.
+
+        Does not replace the reactive 429 backoff above — a shared key can
+        still be rate-limited by traffic this process never made — only
+        reduces how often that path has to fire for calls this process makes
+        on its own.
+        """
+        wait = self._last_call + self._min_interval_s - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        self._last_call = time.monotonic()
 
     async def _get(self, params: dict[str, str]) -> dict:
         async with httpx.AsyncClient(timeout=self._timeout) as client:

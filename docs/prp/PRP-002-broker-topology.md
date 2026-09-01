@@ -82,6 +82,21 @@
 - `croupier auth-status` CLI: days until Schwab token expiry, nag output
   suitable for a cron -> ntfy push (homelab pattern)
 
+**Known gap: `croupier journal` does not observe.** `cmd_journal` builds a
+fresh `DataRouter` and calls `.health()` on it immediately, with no quote ever
+requested — inherited unchanged from the original Stooq adapter, which had the
+same shape. So the DEGRADED banner in the journal (the surface `AGENT.md`
+tells the trading agent to read `data_health` from) means only "a router was
+constructed with something in `TWELVEDATA_API_KEY`", not "this key has
+recently answered". A revoked or exhausted key reports DEGRADED, never DEAD,
+until something else in the same process happens to call `.quote()` first.
+`cmd_mark` does not have this gap — `mark_to_market` calls `router.quote()`
+for every position before reading `router.health()`, so that path is
+genuinely observed. Fixing `journal` needs somewhere to persist the
+last-observed health between processes (a JSON sidecar, a row in the ledger
+DB — undecided) and is tracked as a follow-up rather than folded into this
+component list.
+
 ## Re-auth ergonomics (accepted weekly cost)
 
 Weekly Schwab re-auth is a 60-second browser task. Mitigations: cron nag at

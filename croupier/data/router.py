@@ -41,6 +41,10 @@ class DataRouter:
             if q is not None:
                 return q
             log.warning("primary quote miss for %s; falling back", ticker)
-        if self.fallback is None:
+        if self.fallback is None or self.fallback.health() == DataHealth.DEAD:
+            # Already proven this source will not answer; paying for a request
+            # to re-learn that is not "observed, not assumed" — it is a
+            # request spent on a question already answered. The next call
+            # that queries health() elsewhere still re-observes normally.
             return None
         return await self.fallback.quote(ticker)

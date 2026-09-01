@@ -12,6 +12,8 @@ No network: httpx.MockTransport.
 """
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 
@@ -51,7 +53,10 @@ def _responds(status=200, json=None):
 
 
 def _feed():
-    return TwelveDataMarketData("test-key")
+    # Pacing off by default so tests that make several calls on one instance
+    # don't pay real wall-clock time; the pacing behaviour itself is tested
+    # explicitly below with it turned back on.
+    return TwelveDataMarketData("test-key", min_interval_s=0)
 
 
 async def test_quote_takes_the_newest_row(mock_http):
@@ -258,3 +263,97 @@ async def test_a_plan_gated_symbol_is_logged_not_silent(mock_http, caplog):
     with caplog.at_level("INFO"):
         assert await _feed().quote("CTRA") is None
     assert any("plan-gated" in r.message for r in caplog.records)
+
+
+# --- non-dict JSON must not raise into a trading path -----------------------
+
+async def test_a_non_dict_json_response_is_a_refusal_not_a_crash(mock_http):
+    """The file's own promise is unconditional: 'never raises into a trading
+    path'. Anything between us and the vendor — a CDN error page, a WAF
+    block — can hand back JSON that isn't the vendor's own shape, and every
+    `payload.get(...)` call assumes a dict."""
+    # _responds()'s `json or OK` treats an empty list as falsy and would
+    # silently substitute a valid payload, so build the response directly.
+    mock_http(lambda request: httpx.Response(200, json=[]))  # well-formed, wrong shape
+    feed = _feed()
+    assert await feed.quote("ACME") is None
+    assert feed.health() == DataHealth.DEAD
+
+
+async def test_a_non_dict_json_after_a_429_retry_is_also_a_refusal(mock_http):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"code": 429, "status": "error",
+                                             "message": "rate limited"})
+        return httpx.Response(200, json="not an object either")
+
+    mock_http(handler)
+    feed = TwelveDataMarketData("test-key", backoff_s=0)
+    assert await feed.quote("ACME") is None
+    assert feed.health() == DataHealth.DEAD
+
+
+# --- the router does not pay for a fallback it already knows is dead --------
+
+async def test_the_router_does_not_query_a_fallback_already_known_dead(mock_http):
+    """Distinct from `test_the_router_floor_goes_dead_with_it` below: this
+    checks quote(), not health() — a second call after the first has already
+    proven the source dead must not make a second request to relearn it."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(401, json={"code": 401, "status": "error",
+                                         "message": "bad key"})
+
+    mock_http(handler)
+    feed = _feed()
+    router = DataRouter(None, feed)
+
+    assert await router.quote("SPY") is None
+    assert feed.health() == DataHealth.DEAD
+    assert calls["n"] == 1
+
+    assert await router.quote("AAPL") is None
+    assert calls["n"] == 1, "router queried a fallback it already knew was dead"
+
+
+# --- pre-emptive pacing toward the 8/minute ceiling --------------------------
+
+async def test_calls_are_paced_at_least_min_interval_apart(mock_http):
+    """marking.py quotes tickers one at a time with no batching, so any
+    sleeve past 8 positions hits the 8/minute ceiling in the ordinary case.
+    Pre-emptive pacing turns that into a steady per-call wait instead of a
+    reactive 61s stall once every 8 calls."""
+    mock_http(_responds())
+    feed = TwelveDataMarketData("test-key", min_interval_s=0.05)
+
+    t0 = time.monotonic()
+    await feed.quote("A")
+    await feed.quote("B")
+    elapsed = time.monotonic() - t0
+    assert elapsed >= 0.05, f"second call did not wait for the pacing floor: {elapsed}"
+
+
+async def test_pacing_does_not_stack_with_the_reactive_backoff(mock_http):
+    """The two delays serve different purposes and must not compound: pacing
+    prevents this process's own calls from tripping the limit; backoff
+    recovers from a limit tripped by something else sharing the key."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"code": 429, "status": "error",
+                                             "message": "rate limited"})
+        return httpx.Response(200, json=OK)
+
+    mock_http(handler)
+    feed = TwelveDataMarketData("test-key", min_interval_s=0, backoff_s=0.05)
+    t0 = time.monotonic()
+    assert await feed.quote("ACME") is not None
+    elapsed = time.monotonic() - t0
+    assert 0.05 <= elapsed < 0.5, f"expected ~backoff_s, got {elapsed}"
