@@ -52,8 +52,9 @@ valid and common output. Log the daily summary to data/journal/.
   its trading product be enabled on your own initiative, and never treat Schwab holdings as
   tradeable inventory. Schwab is the vault; you do not have hands there.
 - **Respect data health.** Include current `data_health` in every check
-  payload. On DEGRADED (Schwab token lapsed -> Stooq EOD fallback): no new
-  AUTO entries; exits proceed and are flagged; CONFIRM reports must show
-  the DEGRADED banner. On DEAD: place nothing without explicit human
-  instruction. Run `croupier auth-status` in the daily cycle and surface
+  payload. On DEGRADED (Schwab token lapsed -> EOD floor): no new AUTO
+  entries; exits proceed and are flagged; CONFIRM reports must show the
+  DEGRADED banner. On DEAD: place nothing without explicit human
+  instruction — and note that DEAD now includes "no EOD credentials are
+  configured", not only "the feed refused us". Run `croupier auth-status` in the daily cycle and surface
   the re-auth nag in the journal at T-24h.

@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 import pytest
 
 from croupier.audit import AuditLog
-from croupier.data.base import DataHealth
+from croupier.data.base import DataHealth, Quote
 from croupier.ledger import Fill, Ledger
 from croupier.marking import mark_to_market
 from croupier.state import SleeveState
@@ -26,7 +26,9 @@ def led(tmp_path):
         yield ledger
 
 
-async def test_marks_open_positions_at_the_quoted_price(led, fake_router, tmp_path):
+async def test_marks_open_positions_at_the_quoted_price(led, fake_router, tmp_path,
+                                                         monkeypatch):
+    monkeypatch.chdir(tmp_path)  # mark_to_market now persists observed health to data/
     _fill(led, "a1", "buy", 1000, 2.80, D1)
     result = await mark_to_market(led, fake_router({"ACME": 3.20}), SleeveState.empty(),
                                   max_drawdown_pct=25.0, as_of=D1)
@@ -142,3 +144,75 @@ def test_router_reports_dead_when_every_source_is_dead(fake_router):
     """The floor beneath DEGRADED: nothing trades without human instruction."""
     assert fake_router({}, DataHealth.DEAD).health() == DataHealth.DEAD
     assert fake_router({"ACME": 1.0}, DataHealth.FRESH).health() == DataHealth.FRESH
+
+
+# --- observed health persists across processes (the journal gap) -----------
+
+async def test_mark_persists_what_it_observed(led, tmp_path, monkeypatch):
+    """DataRouter only ever reports DEGRADED via a non-dead fallback — no real
+    primary (Schwab) reports DEGRADED itself, only FRESH or DEAD — so this
+    needs a router built directly rather than through `fake_router`, whose
+    fallback is fixed at DEAD."""
+    from croupier.data import observed_health
+    from croupier.data.router import DataRouter
+
+    class _DegradedFeed:
+        """No cross-module import needed: `fake_router`'s fallback is fixed
+        at DEAD, and no real primary (Schwab) ever reports DEGRADED itself —
+        only FRESH or DEAD — so a DEGRADED overall router needs a
+        purpose-built fallback, not the shared fixture."""
+        name = "fake"
+
+        def health(self):
+            return DataHealth.DEGRADED
+
+        async def quote(self, ticker):
+            return Quote(ticker=ticker.upper(), price=3.20,
+                        as_of=datetime(D1.year, D1.month, D1.day, tzinfo=UTC),
+                        source="fake", health=DataHealth.DEGRADED)
+
+    monkeypatch.chdir(tmp_path)
+    router = DataRouter(None, _DegradedFeed())
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    await mark_to_market(led, router, SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D1)
+
+    assert observed_health.load() == DataHealth.DEGRADED
+
+
+async def test_mark_with_no_open_positions_does_not_overwrite_a_prior_observation(
+        led, fake_router, tmp_path, monkeypatch):
+    """Zero positions means _quote_all queries nothing, so router.health()
+    here is still the router's constructed-optimistic default — persisting
+    it would smuggle the exact unobserved-but-reported bug back in through
+    an empty book."""
+    from croupier.data import observed_health
+
+    monkeypatch.chdir(tmp_path)
+    observed_health.save(DataHealth.DEAD)  # a real prior observation
+
+    result = await mark_to_market(led, fake_router({}, DataHealth.FRESH),
+                                  SleeveState.empty(), max_drawdown_pct=25.0, as_of=D1)
+
+    assert result.marks == ()
+    assert observed_health.load() == DataHealth.DEAD, (
+        "an unobserved router's optimistic default overwrote a real prior "
+        "observation")
+
+
+def test_observed_health_defaults_to_dead_when_never_recorded(tmp_path, monkeypatch):
+    """Absent is 'never observed', which cannot be DEGRADED — DEGRADED is
+    itself a claim about having checked."""
+    from croupier.data import observed_health
+
+    monkeypatch.chdir(tmp_path)
+    assert observed_health.load() == DataHealth.DEAD
+
+
+def test_observed_health_defaults_to_dead_on_a_corrupt_sidecar(tmp_path, monkeypatch):
+    from croupier.data import observed_health
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "observed_health.json").write_text("{not json")
+    assert observed_health.load() == DataHealth.DEAD

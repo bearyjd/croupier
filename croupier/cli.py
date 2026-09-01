@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from croupier.audit import AuditLog
+from croupier.data import observed_health
 from croupier.data.base import DataHealth
 from croupier.data.factory import build_router
 from croupier.journal import JOURNAL_DIR
@@ -154,7 +155,12 @@ def cmd_journal() -> int:
     with Ledger(LEDGER_PATH) as ledger:
         report = build_journal(
             policy, ledger, audit,
-            data_health=build_router(policy.schwab_token_path).health(),
+            # Not build_router(...).health() — a router built here and
+            # never queried is optimistic by construction, so that call
+            # always reported DEGRADED-or-better whenever a key was merely
+            # configured. `mark` is the command that actually queries the
+            # floor; this reads what it last saw.
+            data_health=observed_health.load(),
         )
     text = render_journal(report)
     path = write_journal(report, text, JOURNAL_DIR)

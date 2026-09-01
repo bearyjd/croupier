@@ -22,7 +22,7 @@ class Quote:
     ticker: str
     price: float
     as_of: datetime
-    source: str              # "schwab" | "stooq"
+    source: str              # "schwab" | "twelvedata"
     health: DataHealth
 
 

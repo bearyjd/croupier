@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from croupier.audit import AuditLog
+from croupier.data import observed_health
 from croupier.data.base import DataHealth, Quote
 from croupier.data.router import DataRouter
 from croupier.drawdown import EquityPoint, advance
@@ -112,8 +113,17 @@ async def mark_to_market(
     if next_state is not state:
         next_state.save()
 
+    health = router.health()
+    if positions:
+        # Only persisted when this call genuinely queried something. Zero
+        # open positions means _quote_all never asked the router anything,
+        # so router.health() here is still the router's constructed default
+        # — persisting it would smuggle the exact "unobserved but reported
+        # anyway" bug this file exists to fix back in through an empty book.
+        observed_health.save(health, observed_at=utcnow())
+
     return MarkResult(
-        as_of=day, data_health=router.health(),
+        as_of=day, data_health=health,
         marks=tuple(marks), state=next_state,
     )
 

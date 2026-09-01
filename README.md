@@ -307,8 +307,9 @@ croupier auth-status
 ```
 
 Exit `1` when tokens are missing or expired. Schwab refresh tokens
-hard-expire every 7 days (PRP-002); a lapse degrades the feed to Stooq EOD
-rather than stopping exits.
+hard-expire every 7 days (PRP-002); a lapse degrades the feed to the EOD
+floor rather than stopping exits — provided the floor is itself serving,
+which it reports rather than assumes.
 
 ## Development
 
