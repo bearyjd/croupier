@@ -98,6 +98,15 @@ class TwelveDataMarketData:
                 # The source answered; the answer is that it has no such
                 # ticker. One dead ticker is not a dead feed.
                 self._reachable = True
+                if "plan" in message.lower():
+                    # Filature's 530-ticker backfill found this: some tickers
+                    # (CTRA, AMI, SPYB, THR) return this same HTTP 404 not
+                    # because the feed lacks them but because the free tier is
+                    # not entitled to them. Worth a log line rather than
+                    # silence — a ticker missing from the sleeve config's
+                    # marks for this reason is a plan question, not a data one.
+                    log.info("twelvedata: %s is plan-gated on this key (%s)",
+                            ticker, message[:120])
                 return None
             self._mark_unreachable(f"HTTP {code}: {message}")
             return None

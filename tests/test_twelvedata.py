@@ -244,3 +244,17 @@ async def test_no_configured_floor_is_dead_not_degraded():
     providing — the failure invariant 3 was rewritten to prevent."""
     assert DataRouter(None, None).health() == DataHealth.DEAD
     assert await DataRouter(None, None).quote("SPY") is None
+
+
+async def test_a_plan_gated_symbol_is_logged_not_silent(mock_http, caplog):
+    """The real 530-ticker backfill found live large-cap tickers (CTRA, AMI)
+    gated behind a paid plan, returning the same HTTP 404 as a genuinely
+    unknown symbol. Both leave the floor DEGRADED — one dead ticker is not a
+    dead feed either way — but silently discarding which one happened would
+    make a coverage gap invisible to whoever reads the logs."""
+    mock_http(_responds(404, {"code": 404, "status": "error",
+                              "message": "This symbol is available starting "
+                                         "with the Pro or Venture plan"}))
+    with caplog.at_level("INFO"):
+        assert await _feed().quote("CTRA") is None
+    assert any("plan-gated" in r.message for r in caplog.records)
