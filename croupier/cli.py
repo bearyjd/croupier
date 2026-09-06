@@ -117,6 +117,40 @@ def cmd_fill(payload: dict) -> int:
     return 1 if warnings else 0
 
 
+def cmd_decline(payload: dict) -> int:
+    """Retire an approved CONFIRM-mode order that will not be placed.
+
+    The operator said N (or never said Y). The approval stays in the audit
+    log exactly as written; this appends the operator's answer after it so
+    the journal stops listing the order as pending. Declining an approval_id
+    the log has never seen is recorded anyway, flagged, and exits non-zero —
+    an unknown id is more likely a typo than a real order, and a typo should
+    not silently look like a decision.
+    """
+    log = AuditLog(AUDIT_PATH)
+    approval_id = payload["approval_id"]
+    reason = str(payload.get("reason", "")).strip()
+    if not reason:
+        _emit({"logged": False, "error": "a decline needs a reason — it is part of the trail"})
+        return 1
+
+    approval = log.find_approval(approval_id)
+    if approval is None or not approval.get("approved"):
+        log.log_decline(approval_id, reason, known=False)
+        _emit({"logged": True, "known": False, "error": (
+            f"no approved check found for approval_id {approval_id!r}: "
+            "decline recorded and flagged; nothing was pending under that id")})
+        return 1
+
+    intent = approval.get("intent", {})
+    log.log_decline(approval_id, reason)
+    _emit({"logged": True, "known": True, "approval_id": approval_id,
+           "sleeve": intent.get("sleeve"), "ticker": intent.get("ticker"),
+           "side": intent.get("side"), "qty": intent.get("qty"),
+           "reason": reason})
+    return 0
+
+
 def cmd_mark() -> int:
     """Mark every open position, advance equity curves, halt on drawdown."""
     policy = load_full_policy()
@@ -190,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="gate an order intent (JSON on stdin)")
     sub.add_parser("fill", help="report a fill (JSON on stdin)")
+    sub.add_parser("decline",
+                   help="retire an approved order that will not be placed (JSON on stdin)")
     sub.add_parser("mark", help="daily mark-to-market + drawdown halt")
     sub.add_parser("journal", help="render today's operator journal")
     sub.add_parser("auth-status", help="Schwab data-feed token health")
@@ -205,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = json.load(sys.stdin)
     if args.cmd == "check":
         return cmd_check(payload)
+    if args.cmd == "decline":
+        return cmd_decline(payload)
     return cmd_fill(payload)
 
 

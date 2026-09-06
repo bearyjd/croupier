@@ -94,6 +94,32 @@ def test_orphan_fill_does_not_clear_a_pending_confirm(tmp_path, audit, ledger):
     assert [p.approval_id for p in report.pending] == ["a1"]
 
 
+def test_declined_approval_is_no_longer_pending(tmp_path, audit, ledger):
+    """Regression: an approval the operator never acted on stayed pending
+    forever — the log is append-only and nothing could retire it — so the
+    journal exited non-zero every day over an order nobody meant to place."""
+    audit._append(_check_record("a1"))
+    audit._append(_check_record("a2"))
+    audit.log_decline("a1", "checked against a stale snapshot; 56x today's cap")
+    report = _build(tmp_path, audit, ledger)
+    assert [p.approval_id for p in report.pending] == ["a2"]
+
+
+def test_decline_does_not_erase_the_approval_from_the_trail(tmp_path, audit, ledger):
+    audit._append(_check_record("a1"))
+    audit.log_decline("a1", "operator said N")
+    kinds = [r["kind"] for r in audit.records()]
+    assert kinds == ["check", "decline"], "declining must append, never rewrite"
+    assert audit.find_approval("a1") is not None
+
+
+def test_decline_of_an_unknown_id_clears_nothing(tmp_path, audit, ledger):
+    audit._append(_check_record("a1"))
+    audit.log_decline("a9", "typo", known=False)
+    report = _build(tmp_path, audit, ledger)
+    assert [p.approval_id for p in report.pending] == ["a1"]
+
+
 def test_rejected_and_auto_orders_are_not_pending_confirms(tmp_path, audit, ledger):
     audit._append(_check_record("a1", approved=False))
     audit._append(_check_record("a2", requires_confirm=False))
