@@ -53,6 +53,22 @@ class AuditLog:
                       "ticker": ticker, "side": side, "qty": qty,
                       "price": price, "orphan": orphan})
 
+    def log_decline(self, approval_id: str, reason: str,
+                    known: bool = True) -> None:
+        """Record that an approved CONFIRM-mode order will not be placed.
+
+        An approval with no fill is a pending confirm forever — the log is
+        append-only, so the only way to retire one is another record saying
+        so. Declining is an operator act, not a gate decision: the check that
+        produced the approval stays in the trail unchanged, and this record
+        sits after it. ``known=False`` marks a decline of an approval_id the
+        log has never seen; it is still written, for the same reason an
+        orphan fill is.
+        """
+        self._append({"ts": utcnow().isoformat(), "kind": "decline",
+                      "approval_id": approval_id, "reason": reason,
+                      "known": known})
+
     def log_event(self, event: str, detail: dict) -> None:
         """Record a non-order policy event (halts, data-health transitions)."""
         self._append({"ts": utcnow().isoformat(), "kind": "event",

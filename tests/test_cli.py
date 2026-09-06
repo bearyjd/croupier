@@ -63,6 +63,44 @@ def test_fill_without_an_approval_is_audited_but_refused(workspace, monkeypatch,
     assert not (workspace / "data" / "ledger.db").exists()
 
 
+def test_decline_retires_a_pending_confirm_without_touching_the_ledger(
+        workspace, monkeypatch, capsys):
+    """check -> decline: the approval stays in the trail, the journal stops
+    listing it, and no position is ever created."""
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    code, out = _run(monkeypatch, capsys, ["decline"], {
+        "approval_id": verdict["approval_id"], "reason": "operator said N"})
+    assert code == 0 and out["logged"] and out["known"] is True
+    assert out["ticker"] == "ACME" and out["sleeve"] == "event_driven"
+
+    lines = [json.loads(line) for line in
+             (workspace / "data" / "audit.jsonl").read_text().splitlines()]
+    assert [r["kind"] for r in lines] == ["check", "decline"]
+    assert not (workspace / "data" / "ledger.db").exists()
+
+    from croupier.audit import AuditLog
+    from croupier.journal import pending_confirms
+    assert pending_confirms(AuditLog(workspace / "data" / "audit.jsonl")) == ()
+
+
+def test_decline_needs_a_reason(workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    code, out = _run(monkeypatch, capsys, ["decline"], {
+        "approval_id": verdict["approval_id"], "reason": "   "})
+    assert code == 1 and out["logged"] is False
+    audit = (workspace / "data" / "audit.jsonl").read_text()
+    assert '"decline"' not in audit
+
+
+def test_decline_of_an_unknown_id_is_recorded_flagged_and_refused(
+        workspace, monkeypatch, capsys):
+    code, out = _run(monkeypatch, capsys, ["decline"], {
+        "approval_id": "deadbeefdeadbeef", "reason": "fat finger"})
+    assert code == 1 and out["logged"] is True and out["known"] is False
+    audit = (workspace / "data" / "audit.jsonl").read_text()
+    assert '"known": false' in audit
+
+
 def test_fill_that_contradicts_its_approval_is_refused(workspace, monkeypatch, capsys):
     _, verdict = _run(monkeypatch, capsys, ["check"], _order())
     code, out = _run(monkeypatch, capsys, ["fill"], {

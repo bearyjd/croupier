@@ -131,6 +131,23 @@ contradicts the approval — is still written to the audit log (an ungated
 trade is exactly what the trail is for) but refused entry to the ledger, and
 the command exits `1`.
 
+### `croupier decline` — retire an approved order that will not be placed
+
+```bash
+echo '{"approval_id":"8e5dfcc22109ac76",
+       "reason":"operator said N — thesis stale after the resale registration"}' | croupier decline
+```
+
+A CONFIRM-mode approval with no fill is a pending confirm, and the journal
+lists it (and exits `1`) every day until something retires it. The audit log
+is append-only, so the only way to retire one is another record saying so:
+`decline` appends `{"kind": "decline", "approval_id": …, "reason": …}` after
+the approval, which stays in the trail exactly as written. A reason is
+required — the operator's N is part of the record, not housekeeping. Declining
+an `approval_id` the log has never seen is recorded anyway, flagged
+`"known": false`, and exits `1`: an unknown id is more likely a typo than a
+decision, and a typo should not silently look like one.
+
 ### `croupier mark` — daily mark-to-market + drawdown halt
 
 Marks every open position through the data router, advances each sleeve's

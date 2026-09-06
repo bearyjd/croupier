@@ -86,17 +86,26 @@ def latest_account_value(audit: AuditLog) -> tuple[float | None, str | None]:
 
 
 def pending_confirms(audit: AuditLog) -> tuple[PendingConfirm, ...]:
-    """Approved CONFIRM-mode orders with no fill reported against them."""
+    """Approved CONFIRM-mode orders with neither a fill nor a decline
+    reported against them.
+
+    Without the decline path an approval the operator simply never acted on
+    stayed here forever — the log is append-only — and the journal exited
+    non-zero every day over an order nobody intended to place.
+    """
     approved: dict[str, dict] = {}
     filled: set[str] = set()
+    declined: set[str] = set()
     for rec in audit.records():
         if rec.get("kind") == "check" and rec.get("approved") and rec.get("requires_confirm"):
             approved[rec["approval_id"]] = rec
         elif rec.get("kind") == "fill" and not rec.get("orphan"):
             filled.add(rec.get("approval_id"))
+        elif rec.get("kind") == "decline":
+            declined.add(rec.get("approval_id"))
     out = []
     for approval_id, rec in approved.items():
-        if approval_id in filled:
+        if approval_id in filled or approval_id in declined:
             continue
         intent = rec.get("intent", {})
         out.append(PendingConfirm(
