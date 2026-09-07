@@ -180,24 +180,72 @@ async def test_mark_persists_what_it_observed(led, tmp_path, monkeypatch):
     assert observed_health.load() == DataHealth.DEGRADED
 
 
-async def test_mark_with_no_open_positions_does_not_overwrite_a_prior_observation(
+async def test_mark_that_probes_nothing_does_not_overwrite_a_prior_observation(
         led, fake_router, tmp_path, monkeypatch):
-    """Zero positions means _quote_all queries nothing, so router.health()
-    here is still the router's constructed-optimistic default — persisting
-    it would smuggle the exact unobserved-but-reported bug back in through
-    an empty book."""
+    """With the canary disabled and zero positions, _quote_all queries
+    nothing, so router.health() is still the router's constructed-optimistic
+    default — persisting it would smuggle the exact unobserved-but-reported
+    bug back in."""
     from croupier.data import observed_health
 
     monkeypatch.chdir(tmp_path)
     observed_health.save(DataHealth.DEAD)  # a real prior observation
 
     result = await mark_to_market(led, fake_router({}, DataHealth.FRESH),
-                                  SleeveState.empty(), max_drawdown_pct=25.0, as_of=D1)
+                                  SleeveState.empty(), max_drawdown_pct=25.0, as_of=D1,
+                                  canary=None)
 
     assert result.marks == ()
     assert observed_health.load() == DataHealth.DEAD, (
         "an unobserved router's optimistic default overwrote a real prior "
         "observation")
+
+
+async def test_empty_book_observes_the_floor_through_the_canary(led, tmp_path, monkeypatch):
+    """Regression: with no positions, `mark` never wrote observed_health, so
+    `journal` read DEAD forever and the *first* entry was impossible without
+    a human overriding data health. The first unattended cycle hit exactly
+    this. An empty book must still ask the floor something."""
+    from croupier.data import observed_health
+    from croupier.data.router import DataRouter
+
+    asked = []
+
+    class _ServingFloor:
+        name = "fake"
+
+        def health(self):
+            return DataHealth.DEGRADED
+
+        async def quote(self, ticker):
+            asked.append(ticker)
+            return Quote(ticker=ticker, price=500.0,
+                         as_of=datetime(D1.year, D1.month, D1.day, tzinfo=UTC),
+                         source="fake", health=DataHealth.DEGRADED)
+
+    monkeypatch.chdir(tmp_path)
+    assert led.positions() == []
+    result = await mark_to_market(led, DataRouter(None, _ServingFloor()),
+                                  SleeveState.empty(), max_drawdown_pct=25.0, as_of=D1)
+
+    assert asked == ["SPY"], "an empty book must probe the canary, and only it"
+    assert result.marks == ()                       # the canary is not a position
+    assert observed_health.load() == DataHealth.DEGRADED
+
+
+async def test_empty_book_with_a_dead_floor_records_dead(led, fake_router, tmp_path,
+                                                          monkeypatch):
+    """The canary is a probe, not a free pass: a floor that refuses still
+    persists DEAD, observed rather than defaulted."""
+    from croupier.data import observed_health
+
+    monkeypatch.chdir(tmp_path)
+    await mark_to_market(led, fake_router({}, DataHealth.DEAD), SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D1)
+
+    assert (tmp_path / "data" / "observed_health.json").exists(), (
+        "the probe happened, so the observation must be written")
+    assert observed_health.load() == DataHealth.DEAD
 
 
 def test_observed_health_defaults_to_dead_when_never_recorded(tmp_path, monkeypatch):
