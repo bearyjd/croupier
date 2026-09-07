@@ -24,6 +24,10 @@ from croupier.ledger import Ledger
 from croupier.models import utcnow
 from croupier.state import Halt, SleeveState
 
+# Quoted by `mark` when the book is empty, so data health is observed rather
+# than defaulted. One credit a day on the EOD floor; any liquid ticker works.
+CANARY_TICKER = "SPY"
+
 
 @dataclass(frozen=True)
 class SleeveMark:
@@ -52,11 +56,22 @@ async def mark_to_market(
     max_drawdown_pct: float,
     as_of: date | None = None,
     audit: AuditLog | None = None,
+    canary: str | None = CANARY_TICKER,
 ) -> MarkResult:
-    """Mark all sleeves, advance their equity curves, halt on breach."""
+    """Mark all sleeves, advance their equity curves, halt on breach.
+
+    ``canary`` is quoted when the book is empty, so the floor is genuinely
+    observed even before the first position exists. Without it an empty book
+    never wrote ``observed_health`` and ``journal`` read DEAD forever — which
+    made the *first* entry impossible without a human overriding data
+    health, the opposite of what the observed-health rule is for. Pass
+    ``None`` to disable (tests that assert the no-probe path).
+    """
     day = as_of or utcnow().date()
     positions = ledger.positions()
-    quotes = await _quote_all(router, {p.ticker for p in positions})
+    tickers = {p.ticker for p in positions}
+    probe = tickers or ({canary} if canary else set())
+    quotes = await _quote_all(router, probe)
 
     marks: list[SleeveMark] = []
     next_state = state
@@ -114,12 +129,12 @@ async def mark_to_market(
         next_state.save()
 
     health = router.health()
-    if positions:
-        # Only persisted when this call genuinely queried something. Zero
-        # open positions means _quote_all never asked the router anything,
-        # so router.health() here is still the router's constructed default
-        # — persisting it would smuggle the exact "unobserved but reported
-        # anyway" bug this file exists to fix back in through an empty book.
+    if probe:
+        # Only persisted when this call genuinely queried something —
+        # either the open positions or, on an empty book, the canary. With
+        # nothing probed, router.health() is still the router's constructed
+        # default, and persisting it would smuggle the exact "unobserved but
+        # reported anyway" bug this file exists to fix back in.
         observed_health.save(health, observed_at=utcnow())
 
     return MarkResult(
