@@ -52,11 +52,24 @@ def cmd_check(payload: dict) -> int:
         position_cost_basis=payload["account"].get("position_cost_basis", {}),
     )
     policy = load_full_policy()
+    # Held quantity comes from Croupier's own ledger, never from the agent's
+    # snapshot: the whole point of the holdings gate is to catch an agent
+    # that has miscounted its position, so its own count cannot be the
+    # authority. Read for sells only — a buy does not need it, and opening
+    # the ledger on every check would create data/ledger.db before the first
+    # fill ever lands.
+    held_qty = None
+    if intent.side == "sell":
+        with Ledger(LEDGER_PATH) as ledger:
+            held_qty = next((p.qty for p in ledger.positions()
+                             if p.sleeve == intent.sleeve
+                             and p.ticker == intent.ticker.upper()), 0.0)
     verdict = AuditLog(AUDIT_PATH).check_and_log(
         intent, policy.config, snap,
         payload.get("auto_spent_today", 0.0),
         DataHealth(payload.get("data_health", "fresh")),
         calendar=policy.catalysts,
+        held_qty=held_qty,
     )
     _emit({
         "approved": verdict.approved,

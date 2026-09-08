@@ -26,9 +26,10 @@ class AuditLog:
                       snap: AccountSnapshot, auto_spent_today: float = 0.0,
                       data_health: DataHealth = DataHealth.FRESH,
                       calendar: CatalystCalendar | None = None,
-                      today: date | None = None) -> Verdict:
+                      today: date | None = None,
+                      held_qty: float | None = None) -> Verdict:
         verdict = check(intent, cfg, snap, auto_spent_today, data_health,
-                        calendar=calendar, today=today)
+                        calendar=calendar, today=today, held_qty=held_qty)
         record = {
             "ts": utcnow().isoformat(),
             "kind": "check",

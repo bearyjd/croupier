@@ -112,7 +112,7 @@ def test_freeze_never_lowers_a_confirm_sleeve():
 def test_freeze_does_not_gate_exits():
     """An exit into a catalyst must not need the calendar's permission."""
     v = check(_intent(side="sell"), _cfg(Mode.AUTO), _snap(),
-              calendar=_cal(), today=EVENT_START)
+              calendar=_cal(), today=EVENT_START, held_qty=1000)
     assert v.approved is True and v.requires_confirm is False
     assert any(d.gate == "catalyst_freeze" and "no binary event" in d.reason
                for d in v.decisions)

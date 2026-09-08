@@ -66,9 +66,10 @@ def test_position_cap():
 
 def test_sells_bypass_budget_but_not_denylist():
     snap = _snap(sleeve_cost_basis={"event_driven": 10_000.0})
-    assert check(_intent(side="sell"), _cfg(), snap).approved
+    assert check(_intent(side="sell"), _cfg(), snap, held_qty=1000).approved
     assert not check(_intent(side="sell"),
-                     _cfg(denylist={"ACME": DenyLevel.NO_TRADE}), snap).approved
+                     _cfg(denylist={"ACME": DenyLevel.NO_TRADE}), snap,
+                     held_qty=1000).approved
 
 
 def test_halted_sleeve_rejects():
@@ -102,7 +103,8 @@ def test_degraded_blocks_auto_entries_allows_exits():
         auto_order_max_usd=5000, auto_daily_max_usd=5000)})
     buy = check(_intent(), cfg, _snap(), data_health=DataHealth.DEGRADED)
     assert not buy.approved
-    sell = check(_intent(side="sell"), cfg, _snap(), data_health=DataHealth.DEGRADED)
+    sell = check(_intent(side="sell"), cfg, _snap(), data_health=DataHealth.DEGRADED,
+                 held_qty=1000)
     assert sell.approved
 
 
@@ -114,7 +116,7 @@ def test_degraded_allows_confirm_buys_with_flag():
 
 def test_dead_data_rejects_everything():
     assert not check(_intent(side="sell"), _cfg(), _snap(),
-                     data_health=DataHealth.DEAD).approved
+                     data_health=DataHealth.DEAD, held_qty=1000).approved
 
 
 def test_intent_naming_an_unknown_sleeve_is_rejected():
@@ -130,3 +132,46 @@ def test_intent_naming_an_unknown_sleeve_is_rejected():
 def test_unknown_sleeve_does_not_require_confirm_because_it_is_not_approved():
     v = check(_intent(sleeve="does_not_exist"), _cfg(), _snap())
     assert v.requires_confirm is False and v.approved is False
+
+
+# --- holdings: Croupier never opens a short ---------------------------------
+
+def test_a_sell_larger_than_the_position_is_rejected():
+    """Regression, found by rehearsing the exit path against the real CLI.
+
+    `_budget_gate` waves sells through ("sell reduces exposure") and
+    `_position_cap` returns "n/a" for them — both correct, both about cost
+    basis. Nothing looked at share counts, so a sell of stock the sleeve
+    does not own passed every gate, and under AUTO would have been placed
+    with no human in the loop. On a margin-enabled account that is a short.
+    """
+    v = check(_intent(side="sell", qty=10), _cfg(), _snap(), held_qty=4)
+    assert not v.approved
+    (holdings,) = [d for d in v.decisions if d.gate == "holdings"]
+    assert not holdings.passed and "never opens a short" in holdings.reason
+
+
+def test_a_sell_within_the_position_passes_the_holdings_gate():
+    v = check(_intent(side="sell", qty=4), _cfg(), _snap(), held_qty=10)
+    (holdings,) = [d for d in v.decisions if d.gate == "holdings"]
+    assert holdings.passed and holdings.reason == "4 of 10 held"
+
+
+def test_selling_the_whole_position_is_allowed():
+    """An exit rule that says EXIT 100% must not be off by a rounding error."""
+    v = check(_intent(side="sell", qty=10), _cfg(), _snap(), held_qty=10)
+    assert all(d.passed for d in v.decisions if d.gate == "holdings")
+
+
+def test_a_sell_with_no_ledger_consulted_fails_closed():
+    """A caller that cannot say what is held cannot be allowed to sell."""
+    v = check(_intent(side="sell", qty=1), _cfg(), _snap())
+    assert not v.approved
+    (holdings,) = [d for d in v.decisions if d.gate == "holdings"]
+    assert not holdings.passed and "holdings unknown" in holdings.reason
+
+
+def test_the_holdings_gate_never_blocks_a_buy():
+    v = check(_intent(), _cfg(), _snap())
+    (holdings,) = [d for d in v.decisions if d.gate == "holdings"]
+    assert holdings.passed and holdings.reason == "n/a"

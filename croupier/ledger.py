@@ -48,7 +48,23 @@ CREATE TABLE IF NOT EXISTS equity_points (
 
 
 class LedgerConflict(RuntimeError):
-    """A different fill was already recorded under this approval_id."""
+    """A reported fill contradicts what the ledger already holds."""
+
+
+class Oversell(LedgerConflict):
+    """A sell exceeds the position the ledger records for that sleeve.
+
+    Subclasses LedgerConflict so existing callers refuse it the same way
+    they refuse a contradictory re-fill: logged to the audit trail, kept
+    out of the ledger, non-zero exit.
+
+    Before this, `_positions_from` clamped an oversell (`sold = min(f.qty,
+    qty)`) and floored the basis at zero, so selling stock the sleeve did
+    not own silently vanished — no negative position, nothing in the
+    journal, and Croupier's book quietly diverged from the broker's with
+    nothing flagged. Clamping is right for *display*; it is wrong as the
+    only response to a fill that cannot be true.
+    """
 
 
 @dataclass(frozen=True)
@@ -125,6 +141,15 @@ class Ledger:
                 f"{existing['price']}; refusing to overwrite with "
                 f"{fill.side} {fill.qty} {fill.ticker} @ {fill.price}"
             )
+        if fill.side == "sell":
+            held = next((p.qty for p in self.positions()
+                         if p.sleeve == fill.sleeve
+                         and p.ticker == fill.ticker.upper()), 0.0)
+            if fill.qty > held + 1e-9:
+                raise Oversell(
+                    f"sell {fill.qty:g} {fill.ticker.upper()} exceeds the "
+                    f"{held:g} the ledger records for sleeve {fill.sleeve!r}: "
+                    "refusing to record a fill that would open a short")
         self._conn.execute(
             "INSERT INTO fills (approval_id, sleeve, ticker, side, qty, price, filled_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
