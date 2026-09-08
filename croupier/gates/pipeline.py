@@ -31,6 +31,14 @@ class SleeveConfig:
     mode: Mode = Mode.CONFIRM
     auto_order_max_usd: float = 0.0
     auto_daily_max_usd: float = 0.0
+    # PRP-002 inv. 2 stops AUTO *entries* on DEGRADED data, to prevent buying
+    # at a price that has already moved. A sleeve whose entries are anchored
+    # to a financing floor rather than to today's tick, and placed as limit
+    # orders, already has that protection in the limit price — see PRP-008.
+    # Off by default: a sleeve must claim this deliberately, and only a
+    # sleeve whose entry rule genuinely does not depend on an intraday quote
+    # may claim it. Never relaxes DEAD, and never touches exits.
+    auto_entries_on_degraded: bool = False
 
 
 @dataclass(frozen=True)
@@ -142,14 +150,26 @@ def _venue_gate(intent: OrderIntent, cfg: PolicyConfig) -> GateDecision:
 
 
 def _data_health_gate(intent: OrderIntent, cfg: PolicyConfig,
-                      data_health: DataHealth, mode: Mode | None) -> GateDecision:
+                      data_health: DataHealth, sc: SleeveConfig | None) -> GateDecision:
+    """DEAD stops everything; DEGRADED stops AUTO entries unless the sleeve
+    has earned the exception (PRP-008).
+
+    DEAD is unconditional and no sleeve may opt out of it: with no price at
+    all, nothing trades without explicit human instruction.
+    """
     if data_health == DataHealth.DEAD:
         return GateDecision("data_health", False,
                             "no market data available: human-instructed orders only")
     if data_health == DataHealth.DEGRADED:
-        if intent.side == "buy" and mode == Mode.AUTO:
-            return GateDecision("data_health", False,
-                                "DEGRADED data: no new AUTO entries (PRP-002 inv. 2)")
+        if intent.side == "buy" and sc is not None and sc.mode == Mode.AUTO:
+            if not sc.auto_entries_on_degraded:
+                return GateDecision("data_health", False,
+                                    "DEGRADED data: no new AUTO entries (PRP-002 inv. 2)")
+            return GateDecision(
+                "data_health", True,
+                "DEGRADED data: AUTO entry allowed for this sleeve — limit-only "
+                "and floor-anchored, so the limit price is the protection "
+                "(PRP-008); flagged for review")
         return GateDecision("data_health", True,
                             "DEGRADED data: EOD fallback in use — flagged for review")
     return GateDecision("data_health", True, "fresh data")
@@ -207,7 +227,7 @@ def check(intent: OrderIntent, cfg: PolicyConfig, snap: AccountSnapshot,
         _position_gate(intent, cfg, snap),
         _holdings_gate(intent, held_qty),
         _order_type_gate(intent, cfg),
-        _data_health_gate(intent, cfg, data_health, sc.mode if sc else None),
+        _data_health_gate(intent, cfg, data_health, sc),
         _catalyst_freeze_decision(freeze, cal.freeze_trading_days),
         _mode_gate(intent, cfg, auto_spent_today),
     )
