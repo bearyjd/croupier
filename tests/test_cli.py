@@ -145,6 +145,7 @@ def test_mark_halts_the_sleeve_and_the_next_check_is_rejected(
     # comments but ran both on today's date, and only passed because the bug
     # that made a same-day re-mark stack on itself was still there.
     from datetime import UTC, datetime
+
     import croupier.marking as marking
     clock = iter([datetime(2026, 8, 26, 12, tzinfo=UTC),
                   datetime(2026, 8, 27, 12, tzinfo=UTC)])
