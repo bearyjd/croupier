@@ -139,6 +139,26 @@ def test_mark_halts_the_sleeve_and_the_next_check_is_rejected(
     routers = iter([fake_router({"ACME": 2.80}), fake_router({"ACME": 1.50})])
     monkeypatch.setattr(cli, "build_router", lambda *_a, **_k: next(routers))
 
+    # The clock has to move: `mark` is idempotent within a day by design, so
+    # two marks on one date recompute the same point rather than producing a
+    # baseline and then a drawdown. This test read "day 1 / day 2" in its
+    # comments but ran both on today's date, and only passed because the bug
+    # that made a same-day re-mark stack on itself was still there.
+    from datetime import UTC, datetime
+
+    import croupier.marking as marking
+    clock = iter([datetime(2026, 8, 26, 12, tzinfo=UTC),
+                  datetime(2026, 8, 27, 12, tzinfo=UTC)])
+    day = [None]
+
+    def _tick():
+        nxt = next(clock, None)
+        if nxt is not None:
+            day[0] = nxt
+        return day[0]
+
+    monkeypatch.setattr(marking, "utcnow", _tick)
+
     assert cli.main(["mark"]) == 0                      # day 1: baseline
     capsys.readouterr()
     assert cli.main(["mark"]) == 1                      # day 2: -46%, new halt

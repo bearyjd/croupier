@@ -264,3 +264,56 @@ def test_observed_health_defaults_to_dead_on_a_corrupt_sidecar(tmp_path, monkeyp
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "observed_health.json").write_text("{not json")
     assert observed_health.load() == DataHealth.DEAD
+
+
+# --- marking is idempotent within a day --------------------------------------
+
+async def test_marking_twice_in_one_day_is_the_same_as_marking_once(
+        led, fake_router, tmp_path, monkeypatch):
+    """Regression, and a prerequisite for running `mark` on an intraday loop.
+
+    equity_points is keyed (sleeve, as_of) and written INSERT OR REPLACE, so
+    today's row is meant to be recomputed. Building it from the *latest*
+    point broke that: the second run of a day read the row the first had just
+    written, measuring today against itself while net_flow_on(day) still
+    reported the whole day's flow — subtracting it twice.
+    """
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 100, 1.00, D1)                # $100 deployed today
+
+    once = await mark_to_market(led, fake_router({"ACME": 1.00}), SleeveState.empty(),
+                                max_drawdown_pct=25.0, as_of=D1)
+    twice = await mark_to_market(led, fake_router({"ACME": 1.00}), SleeveState.empty(),
+                                 max_drawdown_pct=25.0, as_of=D1)
+
+    (a,), (b,) = once.marks, twice.marks
+    assert b.point.twr_index == pytest.approx(a.point.twr_index)
+    assert b.point.drawdown_pct == pytest.approx(a.point.drawdown_pct)
+    assert b.point.drawdown_pct == pytest.approx(0.0), (
+        "a flat day with one buy is not a drawdown")
+    assert not b.halted_now, "re-marking a flat day must not halt the sleeve"
+
+
+async def test_a_third_mark_still_does_not_drift(led, fake_router, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 100, 1.00, D1)
+    seen = []
+    for _ in range(3):
+        r = await mark_to_market(led, fake_router({"ACME": 1.00}), SleeveState.empty(),
+                                 max_drawdown_pct=25.0, as_of=D1)
+        seen.append(r.marks[0].point.twr_index)
+    assert seen[0] == pytest.approx(seen[1]) == pytest.approx(seen[2])
+
+
+async def test_the_next_day_still_builds_on_the_previous_day(
+        led, fake_router, tmp_path, monkeypatch):
+    """Anchoring to 'before today' must not sever the curve between days."""
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 100, 1.00, D1)
+    await mark_to_market(led, fake_router({"ACME": 1.00}), SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D1)
+    day2 = await mark_to_market(led, fake_router({"ACME": 0.80}), SleeveState.empty(),
+                                max_drawdown_pct=25.0, as_of=D2)
+    (m,) = day2.marks
+    assert m.point.drawdown_pct == pytest.approx(20.0, abs=0.01), (
+        "a 20% fall the next day must read as a 20% drawdown")

@@ -86,7 +86,10 @@ async def mark_to_market(
         market_value += sum(p.cost_basis for p in held if p.ticker in unpriced)
 
         point = advance(
-            ledger.last_equity_point(sleeve),
+            # Strictly before today, so re-marking within a day recomputes
+            # today's point instead of stacking on it — see
+            # Ledger.last_equity_point_before.
+            ledger.last_equity_point_before(sleeve, day),
             sleeve=sleeve,
             as_of=day,
             market_value=market_value,
