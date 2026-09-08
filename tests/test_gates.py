@@ -175,3 +175,46 @@ def test_the_holdings_gate_never_blocks_a_buy():
     v = check(_intent(), _cfg(), _snap())
     (holdings,) = [d for d in v.decisions if d.gate == "holdings"]
     assert holdings.passed and holdings.reason == "n/a"
+
+
+# --- PRP-008: DEGRADED and a floor-anchored sleeve ---------------------------
+
+def _auto_cfg(**sleeve_kw):
+    return _cfg(sleeves={"event_driven": SleeveConfig(
+        "event_driven", 10, 3, mode=Mode.AUTO,
+        auto_order_max_usd=5000, auto_daily_max_usd=5000, **sleeve_kw)})
+
+
+def test_degraded_still_blocks_auto_entries_by_default():
+    """The opt-out must be deliberate: a sleeve that has not claimed it is
+    governed by PRP-002 invariant 2 exactly as before."""
+    v = check(_intent(), _auto_cfg(), _snap(), data_health=DataHealth.DEGRADED)
+    assert not v.approved
+    (dh,) = [d for d in v.decisions if d.gate == "data_health"]
+    assert "no new AUTO entries" in dh.reason
+
+
+def test_a_floor_anchored_sleeve_may_take_auto_entries_on_degraded():
+    v = check(_intent(), _auto_cfg(auto_entries_on_degraded=True), _snap(),
+              data_health=DataHealth.DEGRADED)
+    assert v.approved and not v.requires_confirm
+    (dh,) = [d for d in v.decisions if d.gate == "data_health"]
+    assert dh.passed and "flagged for review" in dh.reason
+
+
+def test_the_opt_out_never_reaches_dead():
+    """DEAD is unconditional: with no price at all, nothing trades without
+    explicit human instruction, whatever the sleeve claims."""
+    v = check(_intent(), _auto_cfg(auto_entries_on_degraded=True), _snap(),
+              data_health=DataHealth.DEAD)
+    assert not v.approved
+    (dh,) = [d for d in v.decisions if d.gate == "data_health"]
+    assert not dh.passed and "human-instructed orders only" in dh.reason
+
+
+def test_the_opt_out_does_not_disturb_exits_or_confirm_sleeves():
+    sell = check(_intent(side="sell"), _auto_cfg(auto_entries_on_degraded=True),
+                 _snap(), data_health=DataHealth.DEGRADED, held_qty=1000)
+    assert sell.approved
+    confirm = check(_intent(), _cfg(), _snap(), data_health=DataHealth.DEGRADED)
+    assert confirm.approved and confirm.requires_confirm

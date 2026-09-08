@@ -62,6 +62,7 @@ def load(policy_path: str | Path = DEFAULT_POLICY_PATH,
             mode=Mode(s.get("mode", "confirm")),
             auto_order_max_usd=s.get("auto_order_max_usd", 0.0),
             auto_daily_max_usd=s.get("auto_daily_max_usd", 0.0),
+            auto_entries_on_degraded=bool(s.get("auto_entries_on_degraded", False)),
         )
         for name, s in (raw.get("sleeves") or {}).items()
     }

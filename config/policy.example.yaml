@@ -6,6 +6,12 @@ sleeves:
     budget_pct: 10          # SLEEVE_MAX, mirrored from the sleeve doc
     position_max_pct: 3     # POSITION_MAX
     mode: confirm
+    # PRP-002 inv. 2 blocks AUTO *entries* while data health is DEGRADED, so
+    # nothing buys at a price that has already moved. A sleeve may opt out
+    # only if its entries do not depend on an intraday quote — anchored to a
+    # financing floor, placed as limit orders, so the limit price is that
+    # protection (PRP-008). Never relaxes DEAD; never affects exits.
+    auto_entries_on_degraded: false
   filature:
     budget_pct: 0           # sim-only until PRP-002 horse race concludes
     position_max_pct: 0
