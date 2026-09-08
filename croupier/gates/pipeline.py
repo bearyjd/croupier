@@ -86,6 +86,41 @@ def _position_gate(intent: OrderIntent, cfg: PolicyConfig, snap: AccountSnapshot
     return GateDecision("position_cap", True, f"within ${cap:,.0f} cap")
 
 
+def _holdings_gate(intent: OrderIntent, held_qty: float | None) -> GateDecision:
+    """A sell may not exceed what the ledger says this sleeve holds.
+
+    Nothing else in the pipeline looks at share counts: `_budget_gate` waves
+    sells through ("sell reduces exposure") and `_position_cap` returns "n/a"
+    for them, both correctly, because they reason about cost basis. That left
+    a sell of stock the sleeve does not own passing every gate — and under
+    AUTO, with no human in the loop, being placed. On a margin-enabled
+    account that is a short, which every sleeve document in this repo
+    forbids in prose and nothing enforced in code.
+
+    `held_qty` comes from Croupier's own ledger, not from the agent's
+    account snapshot: the failure being defended against is an agent that
+    miscounts its position, so its own arithmetic cannot be the authority.
+    Every position is required to arrive through `check` -> `fill`
+    (AGENT.md), which makes the ledger the complete record of what Croupier
+    believes is held.
+
+    `None` means no ledger was consulted, and fails closed for sells. A
+    caller that cannot say what is held cannot be allowed to sell.
+    """
+    if intent.side != "sell":
+        return GateDecision("holdings", True, "n/a")
+    if held_qty is None:
+        return GateDecision("holdings", False,
+                            "holdings unknown: a sell cannot be gated without "
+                            "the ledger position")
+    if intent.qty > held_qty + 1e-9:
+        return GateDecision(
+            "holdings", False,
+            f"sell {intent.qty:g} exceeds the {held_qty:g} held: Croupier "
+            "never opens a short")
+    return GateDecision("holdings", True, f"{intent.qty:g} of {held_qty:g} held")
+
+
 def _order_type_gate(intent: OrderIntent, cfg: PolicyConfig) -> GateDecision:
     # Croupier only ever approves limit orders; this gate flags thin liquidity.
     if intent.limit_price < cfg.min_price_for_market_orders and (
@@ -157,7 +192,8 @@ def check(intent: OrderIntent, cfg: PolicyConfig, snap: AccountSnapshot,
           auto_spent_today: float = 0.0,
           data_health: DataHealth = DataHealth.FRESH,
           calendar: CatalystCalendar | None = None,
-          today: date | None = None) -> Verdict:
+          today: date | None = None,
+          held_qty: float | None = None) -> Verdict:
     sc = cfg.sleeves.get(intent.sleeve)
     cal = calendar or CatalystCalendar.empty()
     # Freezes gate *adds* only: an exit into a catalyst never needs a
@@ -169,6 +205,7 @@ def check(intent: OrderIntent, cfg: PolicyConfig, snap: AccountSnapshot,
         _venue_gate(intent, cfg),
         _budget_gate(intent, cfg, snap),
         _position_gate(intent, cfg, snap),
+        _holdings_gate(intent, held_qty),
         _order_type_gate(intent, cfg),
         _data_health_gate(intent, cfg, data_health, sc.mode if sc else None),
         _catalyst_freeze_decision(freeze, cal.freeze_trading_days),
