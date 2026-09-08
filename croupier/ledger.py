@@ -202,6 +202,30 @@ class Ledger:
         ).fetchone()
         return _point_from_row(row) if row is not None else None
 
+    def last_equity_point_before(self, sleeve: str, day: date) -> EquityPoint | None:
+        """The most recent point strictly before ``day``.
+
+        `mark` must be re-runnable within a day: `equity_points` is keyed
+        `(sleeve, as_of)` and written with INSERT OR REPLACE, so today's row
+        is meant to be recomputed, not appended to. Building it from
+        `last_equity_point` breaks that the moment `mark` runs twice — the
+        second run reads the row the first one just wrote, so it measures
+        today against itself while `net_flow_on(day)` still reports the whole
+        day's flow, subtracting it a second time. On a $200 book a $50 buy
+        then reads as a ~25% loss and can fire the drawdown halt on a day
+        that was flat.
+
+        Anchoring to the last point *before* today makes the row a pure
+        function of (yesterday's baseline, today's market value, today's
+        cumulative flow) — the same answer however many times it runs.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM equity_points WHERE sleeve = ? AND as_of < ? "
+            "ORDER BY as_of DESC LIMIT 1",
+            (sleeve, day.isoformat()),
+        ).fetchone()
+        return _point_from_row(row) if row is not None else None
+
     def equity_points(self, sleeve: str) -> list[EquityPoint]:
         return [
             _point_from_row(r) for r in self._conn.execute(
