@@ -24,7 +24,10 @@
 2. **Data health gates automation.** Schwab refresh tokens hard-expire
    every 7 days (manual browser re-auth). If the data feed goes stale:
    - AUTO sleeves are treated as HALTED for *entries* (no new buys on
-     stale data).
+     stale data). **Amended 2026-09-08:** a sleeve whose entries are
+     floor-anchored and limit-only may claim `auto_entries_on_degraded`
+     and take AUTO entries on DEGRADED data — the limit price, not the
+     quote, is the protection. DEAD is untouched.
    - Exit rules still run, using the EOD floor, flagged DEGRADED in the
      audit log. A missed weekly re-auth must never silently disable exits
      over a catalyst weekend — degraded exits beat no exits. This holds only
