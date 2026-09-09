@@ -16,7 +16,8 @@ _HEALTH_BANNER = {
     DataHealth.FRESH: None,
     DataHealth.DEGRADED: (
         "**DEGRADED DATA** — Schwab feed unavailable, EOD fallback in "
-        "use. No new AUTO entries; exits still run and are flagged."),
+        "use. AUTO entries are blocked except for sleeves that are "
+        "floor-anchored and limit-only; exits still run and are flagged."),
     DataHealth.DEAD: (
         "**DEAD DATA** — no market data source available. Place nothing "
         "without explicit human instruction."),

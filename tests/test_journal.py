@@ -139,6 +139,22 @@ def test_degraded_banner_is_shown(tmp_path, audit, ledger):
     assert "DEGRADED DATA" in render(_build(tmp_path, audit, ledger))
 
 
+def test_degraded_banner_does_not_claim_a_blanket_entry_block(tmp_path, audit, ledger):
+    """A floor-anchored, limit-only sleeve may take AUTO entries on DEGRADED
+    data (PRP-002 invariant 2, as amended). The banner is the operator's
+    summary of what the system will do, and the agent reads its own journal
+    — so a flat "no new AUTO entries" here is a false safety claim, not a
+    cosmetic wording issue.
+
+    This pins the semantics because nothing did: the gate carried the
+    exception from the day it landed while this banner went on asserting the
+    amended rule, and the suite stayed green throughout.
+    """
+    text = render(_build(tmp_path, audit, ledger))
+    assert "No new AUTO entries" not in text
+    assert "floor-anchored" in text
+
+
 def test_dead_banner_is_shown(tmp_path, audit, ledger):
     text = render(_build(tmp_path, audit, ledger, health=DataHealth.DEAD))
     assert "DEAD DATA" in text

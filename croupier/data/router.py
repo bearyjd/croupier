@@ -2,8 +2,9 @@
 
 Trading semantics of each state (enforced by venue/data gates + AGENT.md):
   FRESH    — normal operation
-  DEGRADED — no new AUTO entries; exits allowed and flagged; CONFIRM orders
-             carry the health banner
+  DEGRADED — no new AUTO entries, except for a floor-anchored, limit-only
+             sleeve that claims `auto_entries_on_degraded`; exits allowed
+             and flagged; CONFIRM orders carry the health banner
   DEAD     — nothing trades except explicit human instructions
 """
 from __future__ import annotations

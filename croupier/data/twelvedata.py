@@ -11,10 +11,12 @@ of replacement, the candidates measured, and why not Yahoo, are in PRP-004.
 **The floor is observed, not assumed.** health() reports what this adapter has
 seen. It starts optimistic — an adapter that has never been asked is not yet
 known to be down — a refusal flips it to DEAD, and a successful fetch flips it
-back. That distinction carries weight: under PRP-002, DEGRADED means "no new
-AUTO entries, exits proceed on EOD prices", while DEAD means "place nothing
-without explicit human instruction". A source that cannot price anything while
-reporting DEGRADED invites exits against prices that do not exist.
+back. That distinction carries weight: DEGRADED means "no new AUTO entries
+except for a floor-anchored, limit-only sleeve that claims
+`auto_entries_on_degraded` (PRP-002 inv. 2, as amended), exits proceed on EOD
+prices", while DEAD means "place nothing without explicit human instruction".
+A source that cannot price anything while reporting DEGRADED invites exits
+against prices that do not exist.
 
 **A refusal is not an absence.** A well-formed answer with no rows means this
 ticker has no data and the source is healthy; an auth failure, a quota
