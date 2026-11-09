@@ -26,7 +26,7 @@ from croupier.journal import write as write_journal
 from croupier.journal_render import render as render_journal
 from croupier.ledger import LEDGER_PATH, Ledger, LedgerConflict, new_fill
 from croupier.marking import mark_to_market
-from croupier.models import AccountSnapshot, OrderIntent
+from croupier.models import AccountSnapshot, OrderIntent, require_finite
 from croupier.policy import load as load_full_policy
 
 AUDIT_PATH = Path("data/audit.jsonl")
@@ -97,6 +97,14 @@ def cmd_fill(payload: dict) -> int:
     approval_id = payload["approval_id"]
     ticker, side = payload["ticker"], payload["side"]
     qty, price = payload["qty"], payload["price"]
+    try:
+        require_finite(qty=qty, price=price)
+    except ValueError as exc:
+        # Not a fill any approval could cover; never reaches the ledger, but
+        # still goes on the record.
+        log.log_fill(approval_id, ticker, side, qty, price, orphan=True)
+        _emit({"logged": True, "ledger": False, "error": f"{exc}; recorded as ORPHAN"})
+        return 2
 
     approval = log.find_approval(approval_id)
     if approval is None:
@@ -261,11 +269,12 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         _emit({"error": f"invalid JSON on stdin: {exc}"})
         return 2
-    if args.cmd == "check":
-        return cmd_check(payload)
-    if args.cmd == "decline":
-        return cmd_decline(payload)
-    return cmd_fill(payload)
+    handler = {"check": cmd_check, "decline": cmd_decline}.get(args.cmd, cmd_fill)
+    try:
+        return handler(payload)
+    except (ValueError, TypeError, OverflowError) as exc:
+        _emit({"error": f"invalid input: {exc}"})
+        return 2
 
 
 if __name__ == "__main__":

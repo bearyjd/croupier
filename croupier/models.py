@@ -25,10 +25,22 @@ class DenyLevel(enum.StrEnum):
 
 
 def require_finite(**values: float) -> None:
-    """NaN and +/-inf make every ``x > cap`` gate comparison False (fail open)."""
+    """NaN and +/-inf make every ``x > cap`` gate comparison False (fail open).
+
+    bool is an int subclass and strings reach here from JSON, so both are refused.
+    """
     for name, value in values.items():
-        if not math.isfinite(value):
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
             raise ValueError(f"{name} must be a finite number, got {value!r}")
+
+
+def require_non_negative(**values: float) -> None:
+    """Finite and >= 0: a negative amount would cancel a cap it is added to."""
+    require_finite(**values)
+    for name, value in values.items():
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -71,11 +83,10 @@ class AccountSnapshot:
     position_cost_basis: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        require_finite(total_value=self.total_value, cash=self.cash,
-                       **{f"sleeve_cost_basis[{k}]": v
-                          for k, v in self.sleeve_cost_basis.items()},
-                       **{f"position_cost_basis[{k}]": v
-                          for k, v in self.position_cost_basis.items()})
+        require_finite(total_value=self.total_value, cash=self.cash)
+        require_non_negative(
+            **{f"sleeve_cost_basis[{k}]": v for k, v in self.sleeve_cost_basis.items()},
+            **{f"position_cost_basis[{k}]": v for k, v in self.position_cost_basis.items()})
 
 
 @dataclass(frozen=True)

@@ -248,3 +248,22 @@ def test_check_rejects_nonfinite_auto_spent_and_held_qty(bad):
         check(_intent(), _cfg(), _snap(), auto_spent_today=bad)
     with pytest.raises(ValueError, match="finite"):
         check(_intent(side="sell"), _cfg(), _snap(), held_qty=bad)
+
+
+def test_negative_amounts_cannot_cancel_caps():
+    with pytest.raises(ValueError, match="non-negative"):
+        check(_intent(), _cfg(), _snap(), auto_spent_today=-1e9)
+    with pytest.raises(ValueError, match="non-negative"):
+        AccountSnapshot(total_value=1.0, cash=1.0, sleeve_cost_basis={"s": -1e9})
+    with pytest.raises(ValueError, match="non-negative"):
+        AccountSnapshot(total_value=1.0, cash=1.0, position_cost_basis={"A": -1e9})
+    with pytest.raises(ValueError, match="non-negative"):
+        check(_intent(side="sell"), _cfg(), _snap(), held_qty=-5.0)
+
+
+@pytest.mark.parametrize("bad", [True, "5", None])
+def test_order_intent_rejects_bool_and_non_numbers(bad):
+    with pytest.raises(ValueError, match="finite number"):
+        _intent(qty=bad)
+    with pytest.raises(ValueError, match="finite number"):
+        _intent(limit_price=bad)

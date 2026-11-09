@@ -155,9 +155,49 @@ def test_fill_rejects_nonfinite_numbers(workspace, monkeypatch, capsys, literal)
     assert code == 2 and literal in out["error"]
 
 
+def _approved_id(monkeypatch, capsys):
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 0
+    return verdict["approval_id"]
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+@pytest.mark.parametrize("field", ["qty", "price"])
+@pytest.mark.parametrize("bad", ["1e400", "-1e400", '"inf"', '"nan"', "true"])
+def test_fill_after_an_approved_check_rejects_non_finite_or_non_numeric(
+        workspace, monkeypatch, capsys, side, field, bad):
+    approval_id = _approved_id(monkeypatch, capsys)
+    good = {"qty": "1000", "price": "2.79"}
+    good[field] = bad
+    raw = (f'{{"approval_id": "{approval_id}", "ticker": "ACME", "side": "{side}", '
+           f'"qty": {good["qty"]}, "price": {good["price"]}}}')
+    code, out = _run_raw(monkeypatch, capsys, ["fill"], raw)
+    assert code == 2 and out["ledger"] is False
+    assert not (workspace / "data" / "ledger.db").exists()
+    text = (workspace / "data" / "audit.jsonl").read_text()
+    for line in text.splitlines():           # strict JSON: no bare NaN/Infinity
+        json.loads(line, parse_constant=lambda c: pytest.fail(f"bare {c} in audit"))
+    last = json.loads(text.splitlines()[-1])
+    assert last["kind"] == "fill" and last["orphan"] is True
+
+
+@pytest.mark.parametrize("field", ["qty", "limit_price"])
+@pytest.mark.parametrize("bad", ["1e400", '"abc"', "true"])
+def test_check_rejects_overflow_string_and_bool_with_json_error(
+        workspace, monkeypatch, capsys, field, bad):
+    raw = json.dumps({**_order(), field: "@@"}).replace('"@@"', bad)
+    code, out = _run_raw(monkeypatch, capsys, ["check"], raw)
+    assert code == 2 and "error" in out and "approved" not in out
+
+
+def test_malformed_json_is_a_json_error_not_a_traceback(workspace, monkeypatch, capsys):
+    code, out = _run_raw(monkeypatch, capsys, ["check"], "{not json")
+    assert code == 2 and "error" in out
+
+
 def test_check_requires_signal_refs(workspace, monkeypatch, capsys):
-    with pytest.raises(ValueError, match="signal_refs"):
-        _run(monkeypatch, capsys, ["check"], _order(signal_refs=[]))
+    code, out = _run(monkeypatch, capsys, ["check"], _order(signal_refs=[]))
+    assert code == 2 and "signal_refs" in out["error"]
 
 
 def test_mark_halts_the_sleeve_and_the_next_check_is_rejected(

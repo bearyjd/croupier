@@ -6,6 +6,7 @@ BEFORE returning the verdict. Exportable as-is for compliance review.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict
 from datetime import date
@@ -15,6 +16,13 @@ from croupier.catalysts import CatalystCalendar
 from croupier.data.base import DataHealth
 from croupier.gates.pipeline import PolicyConfig, check
 from croupier.models import AccountSnapshot, OrderIntent, Verdict, utcnow
+
+
+def _loggable(value: object) -> object:
+    """A non-finite float cannot be written as strict JSON; keep it as text."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
+    return value
 
 
 class AuditLog:
@@ -51,8 +59,8 @@ class AuditLog:
         logged — an ungated trade is precisely what the audit trail is for."""
         self._append({"ts": utcnow().isoformat(), "kind": "fill",
                       "approval_id": approval_id, "sleeve": sleeve,
-                      "ticker": ticker, "side": side, "qty": qty,
-                      "price": price, "orphan": orphan})
+                      "ticker": ticker, "side": side, "qty": _loggable(qty),
+                      "price": _loggable(price), "orphan": orphan})
 
     def log_decline(self, approval_id: str, reason: str,
                     known: bool = True) -> None:
@@ -116,6 +124,6 @@ class AuditLog:
 
     def _append(self, record: dict) -> None:
         with open(self.path, "a") as f:
-            f.write(json.dumps(record, default=str) + "\n")
+            f.write(json.dumps(record, default=str, allow_nan=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
