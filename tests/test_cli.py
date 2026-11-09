@@ -195,6 +195,18 @@ def test_malformed_json_is_a_json_error_not_a_traceback(workspace, monkeypatch, 
     assert code == 2 and "error" in out
 
 
+def test_fill_with_null_approval_id_cannot_join_a_rejected_check(
+        workspace, monkeypatch, capsys):
+    """A rejected check logs approval_id null; a null id must not match it."""
+    _run(monkeypatch, capsys, ["check"], _order(venue="schwab"))
+    code, out = _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": None, "ticker": "ACME", "side": "buy",
+        "qty": 1, "price": 1.0})
+    assert code == 1 and out["ledger"] is False
+    assert not (workspace / "data" / "ledger.db").exists() or not any(
+        Ledger(workspace / "data" / "ledger.db").positions())
+
+
 def test_check_requires_signal_refs(workspace, monkeypatch, capsys):
     code, out = _run(monkeypatch, capsys, ["check"], _order(signal_refs=[]))
     assert code == 2 and "signal_refs" in out["error"]

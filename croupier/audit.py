@@ -118,7 +118,8 @@ class AuditLog:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if rec.get("kind") == "check" and rec.get("approval_id") == approval_id:
+                if (rec.get("kind") == "check" and rec.get("approved")
+                        and rec.get("approval_id") == approval_id):
                     found = rec
         return found
 
