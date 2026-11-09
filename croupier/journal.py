@@ -162,6 +162,8 @@ def forced_reconciles(audit: AuditLog, now: datetime) -> tuple[ForcedReconcile, 
             ts = datetime.fromisoformat(rec["ts"])
         except (KeyError, TypeError, ValueError):
             continue
+        if ts.tzinfo is None:   # hand-edited or legacy: read as UTC, still show it
+            ts = ts.replace(tzinfo=UTC)
         if now - ts <= FORCED_RECONCILE_WINDOW:
             out.append(ForcedReconcile(
                 str(rec.get("fill_id")), rec["ts"], str(rec.get("ticker")),

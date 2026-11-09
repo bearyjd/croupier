@@ -1194,3 +1194,112 @@ def test_forced_reconcile_older_than_24h_or_unforced_is_not_surfaced(workspace):
     assert forced_reconciles(log, now) == ()
     log._append({**base, "ts": (now - timedelta(hours=23)).isoformat(), "force": True})
     assert len(forced_reconciles(log, now)) == 1
+
+
+# --- reconcile hardening: races, naive ts, defensive guards -------------------------
+
+def _no_reconcile_record(workspace):
+    return not [r for r in _audit_lines(workspace) if r["kind"] == "reconcile"]
+
+
+def test_reconcile_insert_race_refuses_and_keeps_the_issue_open(workspace, monkeypatch, capsys):
+    """Another process inserted the identical row between our ledger read and
+    our insert: record_fill reports not-inserted and it is not provably ours."""
+    from croupier.audit import AuditLog
+    from croupier.journal import needs_action
+    _, handle = _refused_handle(workspace, monkeypatch, capsys)
+    monkeypatch.setattr(Ledger, "record_fill", lambda self, fill: False)
+    code, out = _reconcile(monkeypatch, capsys, handle)
+    assert code == 1 and out["ledger"] is False and "not provably a replay" in out["error"]
+    assert _no_reconcile_record(workspace)
+    log = AuditLog(workspace / "data" / "audit.jsonl")
+    assert any(i.handle == handle for i in needs_action(log))
+
+
+def test_two_operators_reconciling_one_fill_concurrently_count_it_once(
+        workspace, monkeypatch, capsys):
+    import threading
+    _, handle = _refused_handle(workspace, monkeypatch, capsys)
+    capsys.readouterr()
+    a_at_fills, b_done = threading.Event(), threading.Event()
+    real_fills, real_record = Ledger.fills, Ledger.record_fill
+    first = {"A": True}
+
+    def fills(self, *a, **k):
+        if threading.current_thread().name == "A" and first.pop("A", False):
+            a_at_fills.set()           # A has read the intents; hold it until B finished
+            b_done.wait(1.0)
+        return real_fills(self, *a, **k)
+
+    def record(self, fill):
+        try:
+            return real_record(self, fill)
+        finally:
+            if threading.current_thread().name == "B":
+                b_done.set()
+    monkeypatch.setattr(Ledger, "fills", fills)
+    monkeypatch.setattr(Ledger, "record_fill", record)
+    codes = {}
+
+    def run(name):
+        if name == "B":
+            assert a_at_fills.wait(5)
+        codes[name] = cli.cmd_reconcile(handle, 1000.0, 2.79, "broker confirms")
+    threads = [threading.Thread(target=run, args=(n,), name=n) for n in "AB"]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert codes == {"A": 0, "B": 0}
+    monkeypatch.undo()
+    monkeypatch.chdir(workspace)
+    assert _ledger_qty(workspace) == [1000]
+    flags = sorted(r["inserted"] for r in _audit_lines(workspace) if r["kind"] == "reconcile")
+    assert flags == [False, True]
+
+
+def test_forced_reconcile_with_a_naive_timestamp_is_shown_not_a_crash(workspace):
+    from datetime import UTC, datetime
+
+    from croupier.audit import AuditLog
+    from croupier.journal import forced_reconciles
+    log = AuditLog(workspace / "data" / "audit.jsonl")
+    log._append({"kind": "reconcile", "force": True, "ts": "2026-11-09T10:00:00",
+                 "fill_id": "f", "ticker": "ACME", "side": "buy", "qty": 1, "price": 1,
+                 "reason": "r"})
+    log._append({"kind": "reconcile", "force": True, "ts": "garbage", "fill_id": "g"})
+    got = forced_reconciles(log, datetime(2026, 11, 9, 12, tzinfo=UTC))
+    assert [f.fill_id for f in got] == ["f"]
+
+
+def test_reconcile_never_merges_into_another_fills_row_even_if_the_intent_is_lost(
+        workspace, monkeypatch, capsys):
+    from croupier.audit import AuditLog
+    handle = _split_partial_fill(workspace, monkeypatch, capsys)     # row "x" = 500 @ 2.79
+    real = AuditLog.log_reconcile
+    monkeypatch.setattr(AuditLog, "log_reconcile",
+                        lambda self, *a, **k: (_ for _ in ()).throw(OSError("x")))
+    with pytest.raises(OSError):
+        _reconcile(monkeypatch, capsys, handle, qty="500", price="2.79")
+    monkeypatch.setattr(AuditLog, "log_reconcile", real)
+    path = workspace / "data" / "audit.jsonl"
+    kept = [ln for ln in path.read_text().splitlines() if "reconcile_intent" not in ln]
+    path.write_text("\n".join(kept) + "\n")                          # the intent is lost
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="500", price="2.79")
+    assert code == 1 and "already taken by another fill" in out["error"]
+    assert _ledger_qty(workspace) == [500, 500] and _no_reconcile_record(workspace)
+
+
+def test_row_under_the_intent_key_with_different_values_is_not_a_replay(
+        workspace, monkeypatch, capsys):
+    from croupier.audit import AuditLog
+    _, handle = _refused_handle(workspace, monkeypatch, capsys)
+    monkeypatch.setattr(AuditLog, "log_reconcile",
+                        lambda self, *a, **k: (_ for _ in ()).throw(OSError("x")))
+    with pytest.raises(OSError):
+        _reconcile(monkeypatch, capsys, handle, qty="1000", price="2.79")
+    monkeypatch.undo()
+    monkeypatch.chdir(workspace)
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="900", price="2.79")
+    assert code == 1 and out["ledger"] is False and "inserted" not in out
+    assert _ledger_qty(workspace) == [1000] and _no_reconcile_record(workspace)
