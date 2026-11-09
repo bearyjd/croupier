@@ -36,6 +36,11 @@ def _emit(obj: object) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
+def _reject_nonfinite(literal: str) -> float:
+    """json.load's parse_constant hook: bare NaN/Infinity/-Infinity are not JSON."""
+    raise ValueError(f"non-finite number {literal} is not accepted")
+
+
 def cmd_check(payload: dict) -> int:
     intent = OrderIntent(
         sleeve=payload["sleeve"], ticker=payload["ticker"], side=payload["side"],
@@ -251,7 +256,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "auth-status":
         return cmd_auth_status()
 
-    payload = json.load(sys.stdin)
+    try:
+        payload = json.load(sys.stdin, parse_constant=_reject_nonfinite)
+    except ValueError as exc:
+        _emit({"error": f"invalid JSON on stdin: {exc}"})
+        return 2
     if args.cmd == "check":
         return cmd_check(payload)
     if args.cmd == "decline":

@@ -123,6 +123,38 @@ def test_rejected_check_yields_no_approval_id(workspace, monkeypatch, capsys):
     assert code == 1 and not verdict["approved"] and verdict["approval_id"] is None
 
 
+NONFINITE = ("NaN", "Infinity", "-Infinity")
+
+
+def _run_raw(monkeypatch, capsys, argv, raw):
+    monkeypatch.setattr("sys.stdin", io.StringIO(raw))
+    code = cli.main(argv)
+    return code, json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("literal", NONFINITE)
+@pytest.mark.parametrize("field", ["qty", "limit_price", "cash", "total_value"])
+def test_check_rejects_nonfinite_numbers_at_the_json_boundary(
+        workspace, monkeypatch, capsys, literal, field):
+    order = _order()
+    if field in ("cash", "total_value"):
+        order["account"][field] = "@@"
+    else:
+        order[field] = "@@"
+    raw = json.dumps(order).replace('"@@"', literal)
+    code, out = _run_raw(monkeypatch, capsys, ["check"], raw)
+    assert code == 2 and "approved" not in out and literal in out["error"]
+    assert not (workspace / "data" / "audit.jsonl").exists()
+
+
+@pytest.mark.parametrize("literal", NONFINITE)
+def test_fill_rejects_nonfinite_numbers(workspace, monkeypatch, capsys, literal):
+    raw = ('{"approval_id": "x", "ticker": "ACME", "side": "buy", '
+           f'"qty": {literal}, "price": 1.0}}')
+    code, out = _run_raw(monkeypatch, capsys, ["fill"], raw)
+    assert code == 2 and literal in out["error"]
+
+
 def test_check_requires_signal_refs(workspace, monkeypatch, capsys):
     with pytest.raises(ValueError, match="signal_refs"):
         _run(monkeypatch, capsys, ["check"], _order(signal_refs=[]))

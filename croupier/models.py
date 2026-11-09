@@ -8,6 +8,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -21,6 +22,13 @@ class Mode(enum.StrEnum):
 class DenyLevel(enum.StrEnum):
     NO_TRADE = "no_trade"
     ETF_ONLY = "etf_only"
+
+
+def require_finite(**values: float) -> None:
+    """NaN and +/-inf make every ``x > cap`` gate comparison False (fail open)."""
+    for name, value in values.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,9 @@ class OrderIntent:
             raise ValueError("OrderIntent requires non-empty public signal_refs (PRP-001 inv. 2)")
         if self.side not in ("buy", "sell"):
             raise ValueError(f"bad side {self.side!r}")
+        require_finite(qty=self.qty, limit_price=self.limit_price)
+        if self.adv_shares is not None:
+            require_finite(adv_shares=self.adv_shares)
         if self.qty <= 0 or self.limit_price <= 0:
             raise ValueError("qty and limit_price must be positive")
 
@@ -58,6 +69,13 @@ class AccountSnapshot:
     sleeve_cost_basis: dict[str, float] = field(default_factory=dict)
     # ticker -> current position cost basis (across sleeves)
     position_cost_basis: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        require_finite(total_value=self.total_value, cash=self.cash,
+                       **{f"sleeve_cost_basis[{k}]": v
+                          for k, v in self.sleeve_cost_basis.items()},
+                       **{f"position_cost_basis[{k}]": v
+                          for k, v in self.position_cost_basis.items()})
 
 
 @dataclass(frozen=True)
