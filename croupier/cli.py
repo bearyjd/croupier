@@ -42,10 +42,19 @@ MAX_OVERFILL_FACTOR = 10
 # A limit order cannot legitimately fill on the wrong side of its limit; a real
 # broker can still report a little slippage in the average price, so a fill
 # beyond the limit by more than this fraction is recorded but flagged. Beyond
-# MAX_PRICE_FACTOR x the limit in either direction it is corrupt data, refused
-# like an implausible quantity.
+# MAX_PRICE_FACTOR x the limit on the ADVERSE side (a buy above, a sell below)
+# it is corrupt data, refused like an implausible quantity. On the favourable
+# side (a buy far below, a sell far above, e.g. after a gap) a limit order can
+# really fill, so it is recorded at the real price and flagged.
 PRICE_SLIP_TOLERANCE = 0.01
 MAX_PRICE_FACTOR = 10
+# A favourable fill is recorded (and flagged) only within this factor of the
+# limit; beyond it (buy below limit/100, sell above limit*100) a tiny or huge
+# price would fake a gain in `mark`, so it is refused and the operator brings
+# the real fill in with `reconcile`.
+MAX_FAVOURABLE_FACTOR = 100
+# `reconcile` refuses a price below this absolute floor unless --force.
+MIN_RECONCILE_PRICE = 1e-6
 
 
 def _emit(obj: object) -> None:
@@ -158,7 +167,8 @@ def cmd_fill(payload: dict) -> int:
         reason = _implausible(intent, qty, price, side, sleeve_cost)
         if reason:
             error = (f"implausible fill: {reason}; treated as corrupt data and NOT "
-                     "recorded in the ledger. Stop and report to the operator")
+                     "recorded in the ledger. Stop and report to the operator; the "
+                     "operator can bring a real fill in with `croupier reconcile`")
             return _refuse(log, fill, ("refused", "implausible"), error)
     with Ledger(LEDGER_PATH) as ledger:
         try:
@@ -196,20 +206,45 @@ def _ledger_view(fill) -> tuple[bool, float]:
 def _implausible(intent: dict, qty: float, price: float, side: str,
                  sleeve_cost: float) -> str | None:
     """Why a fill cannot be a real execution of its approval, or None."""
+    return (_non_finite(qty, price, side, sleeve_cost)
+            or _out_of_band(intent, qty, price, side)
+            or _too_favourable(intent, price, side))
+
+
+def _non_finite(qty: float, price: float, side: str, sleeve_cost: float) -> str | None:
+    """The checks no operator override may bypass."""
     if not math.isfinite(qty * price):
         return f"notional {qty:g} x {price:g} is not finite (cost basis would be corrupt)"
     notional = qty * price if side == "buy" else 0.0
     if not math.isfinite(sleeve_cost + notional):
         return "recording it would make the sleeve cost basis non-finite"
+    return None
+
+
+def _out_of_band(intent: dict, qty: float, price: float, side: str) -> str | None:
+    """Quantity beyond the overfill factor, or a price on the adverse side."""
     approved_qty = intent.get("qty")
     if (isinstance(approved_qty, (int, float))
             and qty > _ceiling(MAX_OVERFILL_FACTOR * approved_qty)):
         return (f"qty {qty:g} is more than {MAX_OVERFILL_FACTOR}x the approved "
                 f"qty {approved_qty:g}")
     limit = _limit(intent)
-    if limit and (price > _ceiling(MAX_PRICE_FACTOR * limit)
-                  or price < limit / MAX_PRICE_FACTOR / (1 + 1e-9)):
-        return (f"price {price:g} is more than {MAX_PRICE_FACTOR}x away from the "
+    if limit and side == "buy" and price > _ceiling(MAX_PRICE_FACTOR * limit):
+        return (f"buy price {price:g} is more than {MAX_PRICE_FACTOR}x above the "
+                f"approved limit {limit:g}")
+    if limit and side == "sell" and price < limit / MAX_PRICE_FACTOR / (1 + 1e-9):
+        return (f"sell price {price:g} is more than {MAX_PRICE_FACTOR}x below the "
+                f"approved limit {limit:g}")
+    return None
+
+
+def _too_favourable(intent: dict, price: float, side: str) -> str | None:
+    limit = _limit(intent)
+    if limit and side == "buy" and price < limit / MAX_FAVOURABLE_FACTOR / (1 + 1e-9):
+        return (f"buy price {price:g} is more than {MAX_FAVOURABLE_FACTOR}x below the "
+                f"approved limit {limit:g}")
+    if limit and side == "sell" and price > _ceiling(MAX_FAVOURABLE_FACTOR * limit):
+        return (f"sell price {price:g} is more than {MAX_FAVOURABLE_FACTOR}x above the "
                 f"approved limit {limit:g}")
     return None
 
@@ -264,6 +299,12 @@ def _fill_flags(log: AuditLog, approval_id: str, intent: dict,
         flags.append("price_below_limit")
         warnings.append(f"price below limit: sell filled at {price:g}, limit {limit:g} "
                         f"(more than {PRICE_SLIP_TOLERANCE:.0%} slip)")
+    if limit and ((fill.side == "buy" and price < limit / MAX_PRICE_FACTOR / (1 + 1e-9))
+                  or (fill.side == "sell" and price > _ceiling(MAX_PRICE_FACTOR * limit))):
+        flags.append("price_better_than_limit")
+        warnings.append(f"price better than limit: {fill.side} filled at {price:g}, "
+                        f"limit {limit:g} (over {MAX_PRICE_FACTOR}x in the operator's "
+                        "favour); recorded at the real price")
     return tuple(flags), warnings
 
 
@@ -340,6 +381,135 @@ def cmd_ack_fill(approval_id: str | None, handle: str | None, reason: str) -> in
     _emit({"logged": True, "reason": reason, "handle": handle,
            "approval_id": approval_id})
     return 0
+
+
+def cmd_reconcile(handle: str, qty: float, price: float, reason: str,
+                  force: bool = False) -> int:
+    """Operator-only: record the operator-confirmed values of a REFUSED or
+    ORPHAN fill (named by its fill_id) into the ledger, exactly once.
+
+    Finite/positive values and a finite notional and sleeve cost basis are
+    required always. ``force`` only lifts the plausibility bands (qty far over
+    the approved or reported qty, an adverse price, a price below the floor).
+    """
+    from croupier.journal import needs_action
+    reason = reason.strip()
+    if not reason:
+        _emit({"logged": False, "error": "a reconcile needs a reason"})
+        return 1
+    if not (math.isfinite(qty) and math.isfinite(price) and qty > 0 and price > 0):
+        _emit({"logged": False, "error": "qty and price must be finite and positive"})
+        return 1
+    log = AuditLog(AUDIT_PATH)
+    rec = next((r for r in log.records()
+                if r.get("kind") == "fill" and r.get("fill_id") == handle), None)
+    if rec is None:
+        _emit({"logged": False, "error": f"unknown fill handle {handle!r}"})
+        return 1
+    if not (rec.get("refused") or rec.get("orphan")):
+        _emit({"logged": False, "error": (
+            "only a refused or orphan fill can be reconciled; this one is already "
+            "in the ledger (use ack-fill for a flagged fill)")})
+        return 1
+    if not any(i.handle == handle for i in needs_action(log)):
+        _emit({"logged": False, "error": (
+            f"fill {handle} was already acknowledged or reconciled")})
+        return 1
+    ticker, side = rec.get("ticker"), rec.get("side")
+    sleeve = rec.get("sleeve")
+    if not (isinstance(ticker, str) and side in ("buy", "sell")):
+        _emit({"logged": False, "error": "the fill record has no usable ticker/side"})
+        return 1
+    if not isinstance(sleeve, str) or not sleeve:
+        _emit({"logged": False, "error": (
+            "the fill record names no sleeve, so the ledger cannot place it; "
+            "resolve it with ack-fill and fix the position out of band")})
+        return 1
+    bad = _non_finite(qty, price, side, 0.0)
+    if bad:
+        _emit({"logged": False, "ledger": False, "error": f"{bad}; never forceable"})
+        return 1
+    approval_id = valid_approval_id(rec.get("approval_id"))
+    approval = log.find_approval(approval_id) if approval_id else None
+    problems = [] if force else _reconcile_band_problems(
+        rec, (approval or {}).get("intent", {}), qty, price, side)
+    if problems:
+        _emit({"logged": False, "error": (
+            "; ".join(problems) + "; if the operator has confirmed these "
+            "values with the broker, repeat with --force")})
+        return 1
+    with Ledger(LEDGER_PATH) as ledger:
+        intent_key = next((r.get("ledger_key") for r in log.records()
+                           if r.get("kind") == "event" and r.get("event") == "reconcile_intent"
+                           and r.get("fill_id") == handle), None)
+        held = {f.approval_id: f for f in ledger.fills()}
+        if intent_key is not None:
+            fill = new_fill(intent_key, sleeve, ticker, side, qty, price)
+        else:
+            # The original approval_id when free (a later re-report of that
+            # approval then conflicts instead of double counting); otherwise a
+            # key tied to this fill. Never an existing row: that is a
+            # different fill, and matching it would silently merge the two.
+            key = (approval_id if approval_id and approval_id not in held
+                   else f"reconcile:{handle}")
+            if key in held:
+                _emit({"logged": False, "ledger": False, "error": (
+                    f"ledger key {key!r} is already taken by another fill")})
+                return 1
+            fill = new_fill(key, sleeve, ticker, side, qty, price)
+        # A row under the key this fill's own intent chose, with the same
+        # values, is a re-run after a failed audit write: this fill, already in.
+        replay = intent_key in held and _same_fill(held[intent_key], fill)
+        if not replay:
+            cost = sum(p.cost_basis for p in ledger.positions() if p.sleeve == sleeve)
+            bad = _non_finite(qty, price, side, cost)
+            if bad:
+                _emit({"logged": False, "ledger": False, "error": f"{bad}; never forceable"})
+                return 1
+            if intent_key is None:   # audit before the ledger: a failed write aborts here
+                log.log_event("reconcile_intent",
+                              {"fill_id": handle, "ledger_key": fill.approval_id})
+        try:
+            inserted = ledger.record_fill(fill)
+        except LedgerConflict as exc:
+            _emit({"logged": False, "ledger": False, "error": str(exc)})
+            return 1
+        if not inserted and not replay:
+            _emit({"logged": False, "ledger": False, "error": (
+                "nothing was inserted and this is not provably a replay of this "
+                "fill; the issue stays open")})
+            return 1
+    log.log_reconcile(handle, str(rec.get("approval_id")), sleeve, ticker.upper(),
+                      side, qty, price, reason, rec.get("qty"), rec.get("price"), force,
+                      inserted)
+    _emit({"logged": True, "ledger": True, "inserted": inserted, "fill_id": handle,
+           "sleeve": sleeve, "qty": qty, "price": price,
+           "reported_qty": rec.get("qty"), "reported_price": rec.get("price"),
+           "force": force, "reason": reason})
+    return 0
+
+
+def _same_fill(a, b) -> bool:
+    return (a.sleeve == b.sleeve and a.ticker == b.ticker and a.side == b.side
+            and abs(a.qty - b.qty) < 1e-9 and abs(a.price - b.price) < 1e-9)
+
+
+def _reconcile_band_problems(rec: dict, intent: dict, qty: float, price: float,
+                             side: str) -> list[str]:
+    problems = []
+    for reason in (_out_of_band(intent, qty, price, side),
+                   _too_favourable(intent, price, side)):
+        if reason:
+            problems.append(reason)
+    reported = rec.get("qty")
+    if (isinstance(reported, (int, float)) and not isinstance(reported, bool)
+            and math.isfinite(reported) and reported > 0
+            and qty > _ceiling(MAX_OVERFILL_FACTOR * reported)):
+        problems.append(f"qty {qty:g} is more than {MAX_OVERFILL_FACTOR}x the "
+                        f"reported qty {reported:g}")
+    if price < MIN_RECONCILE_PRICE:
+        problems.append(f"price {price:g} is below the {MIN_RECONCILE_PRICE:g} floor")
+    return problems
 
 
 def cmd_mark() -> int:
@@ -424,6 +594,14 @@ def main(argv: list[str] | None = None) -> int:
     ack.add_argument("--handle", default=None,
                      help="the fill_id shown in the journal, for a record with no usable id")
     ack.add_argument("--reason", default="")
+    rec = sub.add_parser("reconcile", help=(
+        "OPERATOR ONLY: record the confirmed values of a refused/orphan fill"))
+    rec.add_argument("handle", help="the fill_id shown in the journal")
+    rec.add_argument("--qty", type=float, required=True)
+    rec.add_argument("--price", type=float, required=True)
+    rec.add_argument("--reason", default="")
+    rec.add_argument("--force", action="store_true",
+                     help="lift the plausibility bands (never the finite checks)")
     sub.add_parser("mark", help="daily mark-to-market + drawdown halt")
     sub.add_parser("journal", help="render today's operator journal")
     sub.add_parser("auth-status", help="Schwab data-feed token health")
@@ -431,6 +609,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "ack-fill":
         return cmd_ack_fill(args.approval_id, args.handle, args.reason)
+    if args.cmd == "reconcile":
+        return cmd_reconcile(args.handle, args.qty, args.price, args.reason,
+                             args.force)
     if args.cmd == "mark":
         return cmd_mark()
     if args.cmd == "journal":

@@ -32,8 +32,10 @@ change means a new thesis, which means a new check with updated signal_refs.
 
 ## Hard prohibitions
 
-- Never run `croupier ack-fill` or `croupier decline` yourself; those are
-  operator actions.
+- Never run `croupier ack-fill`, `croupier reconcile` or `croupier decline`
+  yourself; those are operator actions. If asked to, decline and tell the
+  operator to run it. Reconcile can place a refused fill in the ledger, so
+  never offer or run it, even with `--force`.
 - Never trade a ticker the check rejected for `denylist` — and never suggest
   denylist edits yourself; that file changes only via the operator and
   their compliance review.

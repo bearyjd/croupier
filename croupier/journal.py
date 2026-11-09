@@ -13,7 +13,7 @@ rather than implying a live number.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from croupier.audit import AuditLog, valid_approval_id
@@ -88,6 +88,8 @@ _PROBLEMS = (("orphan", "ORPHAN (no matching approval; not in the ledger)"),
              ("implausible", "implausible quantity (over 10x approved, or notional "
                              "not finite): treated as corrupt data"),
              ("fill_after_decline", "fill after decline (recorded in the ledger)"),
+             ("price_better_than_limit", "filled far better than its limit, over 10x "
+                                         "(recorded at the reported price)"),
              ("price_above_limit", "buy filled above its limit price (recorded)"),
              ("price_below_limit", "sell filled below its limit price (recorded)"),
              ("overfill", "overfill (recorded in the ledger at the reported qty)"))
@@ -97,6 +99,7 @@ _MALFORMED = "malformed record: approval_id is not a non-blank string"
 def needs_action(audit: AuditLog) -> tuple[FillIssue, ...]:
     """Flagged, refused, orphan and malformed records with no later ack.
 
+    A ``reconcile`` record resolves its ``fill_id`` the same way.
     An ``ack_fill`` naming a ``handle`` resolves exactly that record; one
     naming only a valid ``approval_id`` resolves every open record carrying
     that id. A record without a usable id can only be resolved by handle.
@@ -105,8 +108,8 @@ def needs_action(audit: AuditLog) -> tuple[FillIssue, ...]:
     for idx, rec in enumerate(audit.records()):
         kind = rec.get("kind")
         match_id = valid_approval_id(rec.get("approval_id"))
-        if kind == "ack_fill":
-            handle = rec.get("handle")
+        if kind in ("ack_fill", "reconcile"):
+            handle = rec.get("handle") or rec.get("fill_id")
             if handle:
                 open_issues = [i for i in open_issues if i.handle != handle]
             elif match_id:
@@ -132,6 +135,43 @@ def needs_action(audit: AuditLog) -> tuple[FillIssue, ...]:
 
 
 @dataclass(frozen=True)
+class ForcedReconcile:
+    """A reconcile the operator forced past the plausibility bands."""
+    fill_id: str
+    ts: str
+    ticker: str
+    side: str
+    qty: float
+    price: float
+    reported_qty: object
+    reported_price: object
+    reason: str
+
+
+FORCED_RECONCILE_WINDOW = timedelta(hours=24)
+
+
+def forced_reconciles(audit: AuditLog, now: datetime) -> tuple[ForcedReconcile, ...]:
+    """Reconciles with force:true in the last 24h, so --force use is visible
+    beyond the audit log."""
+    out = []
+    for rec in audit.records():
+        if rec.get("kind") != "reconcile" or not rec.get("force"):
+            continue
+        try:
+            ts = datetime.fromisoformat(rec["ts"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if now - ts <= FORCED_RECONCILE_WINDOW:
+            out.append(ForcedReconcile(
+                str(rec.get("fill_id")), rec["ts"], str(rec.get("ticker")),
+                str(rec.get("side")), rec.get("qty"), rec.get("price"),
+                rec.get("reported_qty"), rec.get("reported_price"),
+                str(rec.get("reason"))))
+    return tuple(out)
+
+
+@dataclass(frozen=True)
 class JournalReport:
     as_of: date
     data_health: DataHealth
@@ -142,6 +182,7 @@ class JournalReport:
     pending: tuple[PendingConfirm, ...]
     halts: tuple[Halt, ...]
     needs_action: tuple[FillIssue, ...] = ()
+    forced: tuple[ForcedReconcile, ...] = ()
     freezes: tuple[CatalystEvent, ...] = ()   # active catalyst freezes today
     freeze_trading_days: int = 0
 
@@ -185,7 +226,7 @@ def pending_confirms(audit: AuditLog) -> tuple[PendingConfirm, ...]:
         elif (rec.get("kind") == "fill"
               and not any(rec.get(k) for k, _ in _PROBLEMS)):
             fills.append(rec)
-        elif rec.get("kind") in ("decline", "ack_fill"):
+        elif rec.get("kind") in ("decline", "ack_fill", "reconcile"):
             # an acknowledgement is the operator saying they reconciled it
             if aid:
                 declined.add(aid)
@@ -250,6 +291,7 @@ def build(policy: Policy, ledger: Ledger, audit: AuditLog,
         sleeves=tuple(lines),
         pending=pending_confirms(audit),
         needs_action=needs_action(audit),
+        forced=forced_reconciles(audit, now or datetime.now(UTC)),
         halts=tuple(sorted(policy.state.halts.values(), key=lambda h: h.sleeve)),
         freezes=policy.catalysts.freezes_on(day),
         freeze_trading_days=policy.catalysts.freeze_trading_days,
