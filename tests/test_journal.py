@@ -94,6 +94,46 @@ def test_orphan_fill_does_not_clear_a_pending_confirm(tmp_path, audit, ledger):
     assert [p.approval_id for p in report.pending] == ["a1"]
 
 
+@pytest.mark.parametrize("ticker, side, qty", [
+    ("ACME", "sell", 1000),      # wrong side
+    ("BRVO", "buy", 1000),       # wrong ticker
+    ("ACME", "buy", 999999),     # overfill
+    ("ACME", "buy", 1001),       # just over the approved 1000
+])
+def test_fill_that_does_not_match_its_approval_does_not_clear_a_pending_confirm(
+        tmp_path, audit, ledger, ticker, side, qty):
+    audit._append(_check_record("a1"))
+    audit.log_fill("a1", ticker, side, qty, 2.79, sleeve="event_driven")  # not flagged
+    report = _build(tmp_path, audit, ledger)
+    assert [p.approval_id for p in report.pending] == ["a1"]
+
+
+@pytest.mark.parametrize("flag", ["overfill", "fill_after_decline", "refused"])
+def test_flagged_or_refused_fills_do_not_clear_a_pending_confirm(
+        tmp_path, audit, ledger, flag):
+    audit._append(_check_record("a1"))
+    audit.log_fill("a1", "ACME", "buy", 1000, 2.79, sleeve="event_driven", flags=(flag,))
+    report = _build(tmp_path, audit, ledger)
+    assert [p.approval_id for p in report.pending] == ["a1"]
+
+
+def test_needs_action_lists_flagged_orphan_and_refused_fills_until_acked(
+        tmp_path, audit, ledger):
+    audit._append(_check_record("a1"))
+    audit.log_fill("a1", "ACME", "buy", 1500, 2.79, sleeve="event_driven", flags=("overfill",))
+    audit.log_fill("a2", "ACME", "buy", 10, 2.79, orphan=True)
+    audit.log_fill("a3", "ACME", "buy", 10, 2.79, flags=("refused",))
+    audit.log_fill("a4", "ACME", "buy", 10, 2.79)                      # clean: not listed
+    report = _build(tmp_path, audit, ledger)
+    assert sorted(n.approval_id for n in report.needs_action) == ["a1", "a2", "a3"]
+    text = render(report)
+    assert "Needs action (3)" in text and "overfill" in text and "ORPHAN" in text
+
+    audit.log_ack_fill("a1", "reconciled against broker")
+    report = _build(tmp_path, audit, ledger)
+    assert sorted(n.approval_id for n in report.needs_action) == ["a2", "a3"]
+
+
 def test_declined_approval_is_no_longer_pending(tmp_path, audit, ledger):
     """Regression: an approval the operator never acted on stayed pending
     forever — the log is append-only and nothing could retire it — so the
@@ -225,3 +265,40 @@ def test_corrupt_audit_line_does_not_break_the_journal(tmp_path, audit, ledger):
         f.write("{not json\n")
     report = _build(tmp_path, audit, ledger)
     assert len(report.pending) == 1
+
+
+@pytest.mark.parametrize("bad", [["x"], {"k": "v"}, 123, None])
+@pytest.mark.parametrize("kind", ["fill", "decline", "ack_fill", "check"])
+def test_malformed_ids_in_the_audit_log_do_not_blind_the_journal(
+        tmp_path, audit, ledger, bad, kind):
+    audit._append(_check_record("a1"))
+    rec = {"ts": "2026-08-28T11:00:00+00:00", "kind": kind, "approval_id": bad,
+           "ticker": "ACME", "side": "buy", "qty": 1, "reason": "r"}
+    if kind == "check":
+        rec.update(approved=True, requires_confirm=True, intent={})
+    audit._append(rec)
+    report = _build(tmp_path, audit, ledger)          # must not raise
+    assert "a1" in [p.approval_id for p in report.pending]
+    if kind != "ack_fill":
+        assert any("malformed" in " ".join(n.problems) for n in report.needs_action)
+    assert render(report)
+
+
+def test_acking_one_handle_leaves_other_open_issues_open(tmp_path, audit, ledger):
+    audit.log_fill("a1", "ACME", "buy", 10, 2.79, orphan=True)
+    audit.log_fill("a2", "ACME", "buy", 10, 2.79, orphan=True)
+    first, second = (n.handle for n in _build(tmp_path, audit, ledger).needs_action)
+    audit.log_ack_fill(None, "reconciled", handle=first)
+    left = _build(tmp_path, audit, ledger).needs_action
+    assert [n.handle for n in left] == [second]
+
+
+def test_old_records_sharing_a_timestamp_get_distinct_handles(tmp_path, audit, ledger):
+    for aid in ("a1", "a2"):     # pre-fill_id records: only a ts to go on
+        audit._append({"ts": "2026-08-28T11:00:00+00:00", "kind": "fill",
+                       "approval_id": aid, "ticker": "ACME", "side": "buy",
+                       "qty": 1, "price": 1.0, "orphan": True})
+    issues = _build(tmp_path, audit, ledger).needs_action
+    assert len({n.handle for n in issues}) == 2
+    audit.log_ack_fill(None, "r", handle=issues[0].handle)
+    assert len(_build(tmp_path, audit, ledger).needs_action) == 1

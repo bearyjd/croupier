@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from croupier.audit import AuditLog
+from croupier.audit import AuditLog, valid_approval_id
 from croupier.catalysts import CatalystEvent
 from croupier.data.base import DataHealth
 from croupier.gates.pipeline import SleeveConfig
@@ -64,6 +64,74 @@ class AuthStatus:
 
 
 @dataclass(frozen=True)
+class FillIssue:
+    """A record the operator must reconcile: a flagged, refused or orphan
+    fill, or a record whose approval_id is malformed.
+
+    ``match_id`` is the valid string id ``ack-fill <id>`` matches, or None
+    when the record has no usable id; ``handle`` is always usable with
+    ``ack-fill --handle``.
+    """
+    approval_id: str
+    match_id: str | None
+    handle: str
+    ts: str
+    ticker: str
+    side: str
+    qty: float
+    problems: tuple[str, ...]
+
+
+_PROBLEMS = (("orphan", "ORPHAN (no matching approval; not in the ledger)"),
+             ("bad_approval_id", "approval_id is not a non-blank string"),
+             ("refused", "REFUSED: not recorded in the ledger"),
+             ("implausible", "implausible quantity (over 10x approved, or notional "
+                             "not finite): treated as corrupt data"),
+             ("fill_after_decline", "fill after decline (recorded in the ledger)"),
+             ("price_above_limit", "buy filled above its limit price (recorded)"),
+             ("price_below_limit", "sell filled below its limit price (recorded)"),
+             ("overfill", "overfill (recorded in the ledger at the reported qty)"))
+_MALFORMED = "malformed record: approval_id is not a non-blank string"
+
+
+def needs_action(audit: AuditLog) -> tuple[FillIssue, ...]:
+    """Flagged, refused, orphan and malformed records with no later ack.
+
+    An ``ack_fill`` naming a ``handle`` resolves exactly that record; one
+    naming only a valid ``approval_id`` resolves every open record carrying
+    that id. A record without a usable id can only be resolved by handle.
+    """
+    open_issues: list[FillIssue] = []
+    for idx, rec in enumerate(audit.records()):
+        kind = rec.get("kind")
+        match_id = valid_approval_id(rec.get("approval_id"))
+        if kind == "ack_fill":
+            handle = rec.get("handle")
+            if handle:
+                open_issues = [i for i in open_issues if i.handle != handle]
+            elif match_id:
+                open_issues = [i for i in open_issues if i.match_id != match_id]
+            continue
+        problems = ()
+        if kind == "fill":
+            problems = tuple(text for key, text in _PROBLEMS if rec.get(key))
+            if match_id is None and not rec.get("bad_approval_id"):
+                problems += (_MALFORMED,)
+        elif match_id is None and (
+                kind == "decline"
+                or (kind == "check" and rec.get("approved"))):
+            problems = (_MALFORMED,)
+        if problems:
+            open_issues.append(FillIssue(
+                approval_id=str(rec.get("approval_id")),
+                match_id=None if rec.get("bad_approval_id") else match_id,
+                handle=str(rec.get("fill_id") or f"rec{idx}-{rec.get('ts', '')}"),
+                ts=rec.get("ts", ""), ticker=str(rec.get("ticker")),
+                side=str(rec.get("side")), qty=rec.get("qty"), problems=problems))
+    return tuple(open_issues)
+
+
+@dataclass(frozen=True)
 class JournalReport:
     as_of: date
     data_health: DataHealth
@@ -73,6 +141,7 @@ class JournalReport:
     sleeves: tuple[SleeveLine, ...]
     pending: tuple[PendingConfirm, ...]
     halts: tuple[Halt, ...]
+    needs_action: tuple[FillIssue, ...] = ()
     freezes: tuple[CatalystEvent, ...] = ()   # active catalyst freezes today
     freeze_trading_days: int = 0
 
@@ -85,6 +154,18 @@ def latest_account_value(audit: AuditLog) -> tuple[float | None, str | None]:
     return None, None
 
 
+def _fill_matches(approval: dict | None, fill: dict) -> bool:
+    if approval is None:
+        return False
+    intent = approval.get("intent", {})
+    try:
+        within = float(fill["qty"]) <= float(intent["qty"]) + 1e-9
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (within and str(fill.get("ticker", "")).upper() == str(intent.get("ticker", "")).upper()
+            and fill.get("side") == intent.get("side"))
+
+
 def pending_confirms(audit: AuditLog) -> tuple[PendingConfirm, ...]:
     """Approved CONFIRM-mode orders with neither a fill nor a decline
     reported against them.
@@ -94,15 +175,24 @@ def pending_confirms(audit: AuditLog) -> tuple[PendingConfirm, ...]:
     non-zero every day over an order nobody intended to place.
     """
     approved: dict[str, dict] = {}
-    filled: set[str] = set()
+    fills: list[dict] = []
     declined: set[str] = set()
     for rec in audit.records():
+        aid = valid_approval_id(rec.get("approval_id"))
         if rec.get("kind") == "check" and rec.get("approved") and rec.get("requires_confirm"):
-            approved[rec["approval_id"]] = rec
-        elif rec.get("kind") == "fill" and not rec.get("orphan"):
-            filled.add(rec.get("approval_id"))
-        elif rec.get("kind") == "decline":
-            declined.add(rec.get("approval_id"))
+            if aid:
+                approved[aid] = rec
+        elif (rec.get("kind") == "fill"
+              and not any(rec.get(k) for k, _ in _PROBLEMS)):
+            fills.append(rec)
+        elif rec.get("kind") in ("decline", "ack_fill"):
+            # an acknowledgement is the operator saying they reconciled it
+            if aid:
+                declined.add(aid)
+    # A fill clears a pending confirm only if it actually matches the approval:
+    # same ticker and side, within the approved quantity.
+    filled = {valid_approval_id(f.get("approval_id")) for f in fills
+              if _fill_matches(approved.get(valid_approval_id(f.get("approval_id"))), f)}
     out = []
     for approval_id, rec in approved.items():
         if approval_id in filled or approval_id in declined:
@@ -159,6 +249,7 @@ def build(policy: Policy, ledger: Ledger, audit: AuditLog,
         account_snapshot_ts=snapshot_ts,
         sleeves=tuple(lines),
         pending=pending_confirms(audit),
+        needs_action=needs_action(audit),
         halts=tuple(sorted(policy.state.halts.values(), key=lambda h: h.sleeve)),
         freezes=policy.catalysts.freezes_on(day),
         freeze_trading_days=policy.catalysts.freeze_trading_days,

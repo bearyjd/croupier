@@ -109,13 +109,116 @@ def test_fill_that_contradicts_its_approval_is_refused(workspace, monkeypatch, c
     assert code == 1 and out["ledger"] is False and "does not match approval" in out["error"]
 
 
+def _fill_payload(verdict, qty, **kw):
+    return {"approval_id": verdict["approval_id"], "ticker": "ACME",
+            "side": "buy", "qty": qty, "price": 2.79, **kw}
+
+
+def _ledger_qty(workspace):
+    with Ledger(workspace / "data" / "ledger.db") as led:
+        return [f.qty for f in led.fills()]
+
+
 def test_overfill_is_recorded_but_flagged(workspace, monkeypatch, capsys):
+    """The ledger must reflect the real fill: refusing it would understate
+    holdings, so cost-basis caps, marking and the drawdown halt go blind."""
     _, verdict = _run(monkeypatch, capsys, ["check"], _order())
-    code, out = _run(monkeypatch, capsys, ["fill"], {
-        "approval_id": verdict["approval_id"], "ticker": "ACME",
-        "side": "buy", "qty": 1500, "price": 2.79})       # approved 1000
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1500))
     assert code == 1 and out["ledger"] is True
+    assert any("overfill: reported 1500 > approved 1000" in w for w in out["warnings"])
+    assert _ledger_qty(workspace) == [1500.0]
+    last = _audit_lines(workspace)[-1]
+    assert last["overfill"] is True and not last.get("orphan")
+
+
+def test_fill_after_decline_is_recorded_but_flagged(workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["decline"], {
+        "approval_id": verdict["approval_id"], "reason": "operator said N"})
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000))
+    assert code == 1 and out["ledger"] is True
+    assert any("fill after decline" in w for w in out["warnings"])
+    assert _ledger_qty(workspace) == [1000.0]
+    last = _audit_lines(workspace)[-1]
+    assert last["fill_after_decline"] is True and not last.get("orphan")
+
+
+@pytest.mark.parametrize("qty, flagged", [
+    (1000, False), (1000 + 1e-10, False),      # within the 1e-9 tolerance
+    (1000 + 1e-8, True), (1000.5, True), (1001, True),
+])
+def test_overfill_boundary(workspace, monkeypatch, capsys, qty, flagged):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, qty))
+    assert out["ledger"] is True
+    assert bool(out["warnings"]) is flagged and code == (1 if flagged else 0)
+    assert bool(_audit_lines(workspace)[-1].get("overfill")) is flagged
+
+
+def test_identical_replay_is_a_harmless_repeat(workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000))
+    n = len(_audit_lines(workspace))
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000))
+    assert code == 0 and out["ledger"] is True and out["new"] is False
+    assert len(_audit_lines(workspace)) == n
+    assert _ledger_qty(workspace) == [1000.0]
+
+
+def test_replay_of_a_flagged_fill_stays_flagged_and_not_orphaned(
+        workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1500))
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1500))
+    assert code == 1 and out["new"] is False and out["ledger"] is True
     assert any("overfill" in w for w in out["warnings"])
+    assert not any(r.get("orphan") for r in _audit_lines(workspace))
+
+
+def test_conflicting_second_fill_is_logged_as_refused(workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000))
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 900))
+    assert code == 1 and out["ledger"] is False
+    assert _audit_lines(workspace)[-1]["refused"] is True
+
+
+def test_late_decline_of_a_filled_approval_is_refused(workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000))
+    code, out = _run(monkeypatch, capsys, ["decline"], {
+        "approval_id": verdict["approval_id"], "reason": "changed my mind"})
+    assert code == 1 and "already" in out["error"]
+    assert "decline" not in [r["kind"] for r in _audit_lines(workspace)]
+
+
+def test_ack_fill_needs_a_reason_and_a_flagged_fill(workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    aid = verdict["approval_id"]
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1500))
+    code, out = _run(monkeypatch, capsys, ["ack-fill", aid, "--reason", "  "])
+    assert code == 1 and "reason" in out["error"]
+    code, out = _run(monkeypatch, capsys, ["ack-fill", "nope", "--reason", "x"])
+    assert code == 1 and "no unresolved" in out["error"]
+    code, out = _run(monkeypatch, capsys, ["ack-fill", aid, "--reason", "reconciled"])
+    assert code == 0 and out["logged"] is True
+    last = _audit_lines(workspace)[-1]
+    assert last["kind"] == "ack_fill" and last["approval_id"] == aid
+    assert last["reason"] == "reconciled"
+
+
+def test_journal_exits_nonzero_until_a_flagged_fill_is_acknowledged(
+        workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    aid = verdict["approval_id"]
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1500))
+    capsys.readouterr()
+    assert cli.main(["journal"]) == 1
+    text = capsys.readouterr().out
+    assert "Needs action" in text and aid in text and "overfill" in text
+    _run(monkeypatch, capsys, ["ack-fill", aid, "--reason", "reconciled"])
+    capsys.readouterr()
+    assert cli.main(["journal"]) == 0
 
 
 def test_rejected_check_yields_no_approval_id(workspace, monkeypatch, capsys):
@@ -202,7 +305,7 @@ def test_fill_with_null_approval_id_cannot_join_a_rejected_check(
     code, out = _run(monkeypatch, capsys, ["fill"], {
         "approval_id": None, "ticker": "ACME", "side": "buy",
         "qty": 1, "price": 1.0})
-    assert code == 1 and out["ledger"] is False
+    assert code == 2 and out["ledger"] is False
     assert not (workspace / "data" / "ledger.db").exists() or not any(
         Ledger(workspace / "data" / "ledger.db").positions())
 
@@ -444,3 +547,245 @@ def test_journal_with_no_prior_mark_reports_dead_not_a_comfortable_degraded(
     cli.main(["journal"])
     text = capsys.readouterr().out
     assert "data feed: `dead`" in text
+
+
+def test_journal_exits_nonzero_for_an_unacknowledged_orphan_alone(
+        workspace, monkeypatch, capsys):
+    """No pending confirm is involved: the needs-action list alone must trip
+    the exit code."""
+    _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": "ghost", "ticker": "ACME", "side": "buy",
+        "qty": 10, "price": 2.79})
+    capsys.readouterr()
+    assert cli.main(["journal"]) == 1
+    assert "ghost" in capsys.readouterr().out
+    _run(monkeypatch, capsys, ["ack-fill", "ghost", "--reason", "typo, nothing placed"])
+    capsys.readouterr()
+    assert cli.main(["journal"]) == 0
+
+
+# --- round-2 review: ids, implausible fills, replay marker --------------------
+
+BAD_IDS = [123, None, ["x"], {"k": "v"}, "", "  "]
+
+
+@pytest.mark.parametrize("bad", BAD_IDS)
+def test_fill_with_a_non_string_or_empty_approval_id_is_rejected_up_front(
+        workspace, monkeypatch, capsys, bad):
+    code, out = _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": bad, "ticker": "ACME", "side": "buy", "qty": 1, "price": 1.0})
+    assert code == 2 and out["ledger"] is False and "approval_id" in out["error"]
+    last = _audit_lines(workspace)[-1]
+    assert last["kind"] == "fill" and last["orphan"] is True
+    assert isinstance(last["approval_id"], str) and last["bad_approval_id"] is True
+    assert last["fill_id"]
+
+
+def test_null_id_orphan_is_ackable_only_by_its_own_handle(
+        workspace, monkeypatch, capsys):
+    # one null-id orphan and one genuine string-id orphan whose id is "None"
+    _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": None, "ticker": "ACME", "side": "buy", "qty": 1, "price": 1.0})
+    handle = _audit_lines(workspace)[-1]["fill_id"]
+    _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": "None", "ticker": "ACME", "side": "buy", "qty": 1, "price": 1.0})
+    # `ack-fill None` clears only the string-id orphan, never the null-id one
+    code, _ = _run(monkeypatch, capsys, ["ack-fill", "None", "--reason", "r"])
+    assert code == 0
+    capsys.readouterr()
+    assert cli.main(["journal"]) == 1
+    assert handle in capsys.readouterr().out
+    # a handle acknowledges exactly that record
+    code, out = _run(monkeypatch, capsys, ["ack-fill", "--handle", handle, "--reason", "r"])
+    assert code == 0, out
+    capsys.readouterr()
+    assert cli.main(["journal"]) == 0
+
+
+def test_ack_fill_needs_exactly_one_of_id_or_handle(workspace, monkeypatch, capsys):
+    code, out = _run(monkeypatch, capsys, ["ack-fill", "--reason", "r"])
+    assert code == 1 and "approval_id or --handle" in out["error"]
+    code, out = _run(monkeypatch, capsys, ["ack-fill", "x", "--handle", "y", "--reason", "r"])
+    assert code == 1 and "approval_id or --handle" in out["error"]
+
+
+@pytest.mark.parametrize("qty, price", [(1e308, 2.79), (11000, 2.79), (1000, 1e308),
+                                        (10001, 2.79)])
+def test_implausible_fill_is_refused_not_recorded(
+        workspace, monkeypatch, capsys, qty, price):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, qty, price=price)
+                     if price == 2.79 else {**_fill_payload(verdict, qty), "price": price})
+    assert code == 1 and out["ledger"] is False and "implausible" in out["error"]
+    assert not (workspace / "data" / "ledger.db").exists()
+    last = _audit_lines(workspace)[-1]
+    assert last["refused"] is True and last["implausible"] is True
+
+
+@pytest.mark.parametrize("qty", [10000, 1500])
+def test_overfill_up_to_ten_times_is_recorded_and_flagged(
+        workspace, monkeypatch, capsys, qty):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, qty))
+    assert code == 1 and out["ledger"] is True and out["warnings"]
+    assert _ledger_qty(workspace) == [float(qty)]
+
+
+def test_identical_replay_says_so(workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _, first = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000))
+    _, second = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000))
+    assert not first.get("replay") and second["replay"] is True
+
+
+@pytest.mark.parametrize("bad", [123, ["x"], {"k": "v"}, None])
+def test_decline_with_a_non_string_id_is_recorded_unknown_and_never_blinds_the_journal(
+        workspace, monkeypatch, capsys, bad):
+    _run(monkeypatch, capsys, ["check"], _order())
+    code, out = _run(monkeypatch, capsys, ["decline"], {"approval_id": bad, "reason": "r"})
+    assert code == 1 and out["logged"] is True
+    last = _audit_lines(workspace)[-1]
+    assert last["kind"] == "decline" and last["known"] is False
+    assert isinstance(last["approval_id"], str)
+    capsys.readouterr()
+    assert cli.main(["journal"]) == 1       # the real pending confirm still shows
+
+
+# --- round-3 review: price sanity, cost-basis finiteness, replay of refusals ---
+
+def _plant_approval(workspace, approval_id, qty, limit_price, side="buy",
+                    approved=True, sleeve="event_driven"):
+    from croupier.audit import AuditLog
+    intent = {"sleeve": sleeve, "ticker": "ACME", "side": side, "qty": qty}
+    if limit_price is not None:
+        intent["limit_price"] = limit_price
+    (workspace / "data").mkdir(exist_ok=True)
+    AuditLog(workspace / "data" / "audit.jsonl")._append({
+        "ts": "2026-08-28T10:00:00+00:00", "kind": "check", "intent": intent,
+        "approved": approved, "approval_id": approval_id, "requires_confirm": True})
+
+
+def _fill_at(approval_id, qty, price, side="buy"):
+    return {"approval_id": approval_id, "ticker": "ACME", "side": side,
+            "qty": qty, "price": price}
+
+
+@pytest.mark.parametrize("price", [1e300, 31.0, 0.2])     # 11x limit, below limit/10
+def test_absurd_price_is_refused_not_recorded(workspace, monkeypatch, capsys, price):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000, price=price))
+    assert code == 1 and out["ledger"] is False and "implausible" in out["error"]
+    assert not (workspace / "data" / "ledger.db").exists()
+    last = _audit_lines(workspace)[-1]
+    assert last["refused"] is True and last["implausible"] is True
+
+
+@pytest.mark.parametrize("price, flagged", [
+    (2.80, False), (2.80 * 1.005, False), (2.80 * 1.01, False),   # within 1% slip
+    (2.80 * 1.02, True), (4.2, True),                              # above the limit
+    (28.0, True),                                                  # exactly 10x: recorded
+])
+def test_buy_price_above_limit_is_flagged_beyond_tolerance(
+        workspace, monkeypatch, capsys, price, flagged):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000, price=price))
+    assert out["ledger"] is True
+    assert bool(out["warnings"]) is flagged and code == (1 if flagged else 0)
+    assert bool(_audit_lines(workspace)[-1].get("price_above_limit")) is flagged
+    assert len(_ledger_qty(workspace)) == 1
+
+
+@pytest.mark.parametrize("price, flagged", [
+    (2.5, False), (2.0, False), (2.0 * 0.995, False), (2.0 * 0.99, False),
+    (2.0 * 0.98, True), (0.5, True),
+])
+def test_sell_price_below_limit_is_flagged_beyond_tolerance(
+        workspace, monkeypatch, capsys, price, flagged):
+    _plant_approval(workspace, "buy1", 1000, 2.80)
+    _plant_approval(workspace, "sell1", 500, 2.0, side="sell")
+    _run(monkeypatch, capsys, ["fill"], _fill_at("buy1", 1000, 2.80))
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_at("sell1", 500, price, "sell"))
+    assert out["ledger"] is True
+    assert bool(out["warnings"]) is flagged and code == (1 if flagged else 0)
+    assert bool(_audit_lines(workspace)[-1].get("price_below_limit")) is flagged
+
+
+def test_missing_limit_flags_nothing_but_cost_basis_is_still_checked(
+        workspace, monkeypatch, capsys):
+    _plant_approval(workspace, "n1", 1000, None)
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_at("n1", 1000, 1e300))
+    assert code == 0 and out["ledger"] is True and out["warnings"] == []
+    _plant_approval(workspace, "n2", 1000, None)
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_at("n2", 1000, 1e308))
+    assert code == 1 and out["ledger"] is False and "cost basis" in out["error"]
+
+
+def test_fill_that_would_make_cost_basis_non_finite_is_refused(
+        workspace, monkeypatch, capsys):
+    _plant_approval(workspace, "c1", 1e154, 0.9e154)
+    _plant_approval(workspace, "c2", 1e154, 0.9e154)
+    code, _ = _run(monkeypatch, capsys, ["fill"], _fill_at("c1", 1e154, 0.9e154))
+    assert code == 0
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_at("c2", 1e154, 0.9e154))
+    assert code == 1 and out["ledger"] is False and "cost basis" in out["error"]
+    last = _audit_lines(workspace)[-1]
+    assert last["refused"] is True and last["implausible"] is True
+    assert len(_ledger_qty(workspace)) == 1
+
+
+def test_exactly_ten_times_survives_float_rounding(workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order(qty=623.78))
+    assert 10 * 623.78 < 6237.8       # the rounding the tolerance exists for
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 6237.8))
+    assert out["ledger"] is True and any("overfill" in w for w in out["warnings"])
+
+
+def test_replaying_a_refused_fill_does_not_log_a_second_record(
+        workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 10001))
+    n = len(_audit_lines(workspace))
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 10001))
+    assert code == 1 and out["replay"] is True and out["ledger"] is False
+    assert len(_audit_lines(workspace)) == n
+    # a *different* refused report is still a new record
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 10002))
+    assert len(_audit_lines(workspace)) == n + 1
+
+
+def test_replaying_a_conflicting_fill_does_not_log_a_second_record(
+        workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000))
+    _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 900))
+    n = len(_audit_lines(workspace))
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 900))
+    assert code == 1 and out["replay"] is True
+    assert len(_audit_lines(workspace)) == n
+
+
+def test_string_id_fill_cannot_join_a_rejected_check(workspace, monkeypatch, capsys):
+    """#19 property, independent of the null-id input check."""
+    _plant_approval(workspace, "rej1", 1000, 2.80, approved=False)
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_at("rej1", 1000, 2.80))
+    assert code == 1 and out["ledger"] is False
+    assert _audit_lines(workspace)[-1]["orphan"] is True
+    assert not (workspace / "data" / "ledger.db").exists()
+
+
+def test_replay_of_a_recorded_fill_is_not_rechecked_against_its_own_cost_basis(
+        workspace, monkeypatch, capsys):
+    _plant_approval(workspace, "c1", 1e154, 0.9e154)
+    _run(monkeypatch, capsys, ["fill"], _fill_at("c1", 1e154, 0.9e154))
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_at("c1", 1e154, 0.9e154))
+    assert code == 0 and out["replay"] is True and out["ledger"] is True
+
+
+def test_replay_of_a_fill_recorded_before_the_ceilings_existed_is_harmless(
+        workspace, monkeypatch, capsys):
+    from croupier.ledger import new_fill
+    _plant_approval(workspace, "old1", 1000, 2.80)
+    with Ledger(workspace / "data" / "ledger.db") as led:
+        led.record_fill(new_fill("old1", "event_driven", "ACME", "buy", 50000, 2.79))
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_at("old1", 50000, 2.79))
+    assert out["replay"] is True and out["ledger"] is True

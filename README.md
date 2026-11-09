@@ -133,6 +133,47 @@ contradicts the approval — is still written to the audit log (an ungated
 trade is exactly what the trail is for) but refused entry to the ledger, and
 the command exits `1`.
 
+A fill that matches its approval but is discrepant — quantity above the
+approved quantity (tolerance `1e-9`), or reported after the approval was
+declined — is **recorded in the ledger at its real quantity and flagged**:
+the response carries `warnings`, the audit record carries `overfill: true` /
+`fill_after_decline: true`, and the command exits `1`. It is not refused
+because the trade really happened: a ledger that understated holdings would
+make sells fail closed, keep `mark` from marking the position or tripping the
+drawdown halt, and misstate the journal's sleeve lines. (Buy caps use the
+agent-supplied `sleeve_cost_basis` snapshot in `check`, not the ledger.)
+An identical replay of a recorded fill is a harmless repeat (`"new": false`,
+`"replay": true`, no second audit record, same exit code).
+A buy filled more than 1% above its approved limit (or a sell more than 1%
+below it; `PRICE_SLIP_TOLERANCE`) is recorded and flagged `price_above_limit` /
+`price_below_limit`: a limit order cannot fill on the wrong side of its limit,
+but a broker's reported average can drift a little. A fill whose quantity is
+over 10x the approved quantity (`MAX_OVERFILL_FACTOR`), whose price is more
+than 10x away from the limit in either direction (`MAX_PRICE_FACTOR`), whose
+notional is not finite, or that would make the sleeve cost basis non-finite, is
+treated as corrupt data: it is **not** recorded, is logged `refused` + `implausible`, and exits
+`1`. A non-string or blank `approval_id` is rejected up front (exit `2`) and
+logged as an orphan.
+A conflicting second fill for one `approval_id` is refused and logged
+`refused: true`.
+
+Every flagged, refused or orphan fill appears under **Needs action** in the
+journal, which exits `1` until each is acknowledged after reconciling it with
+the broker:
+
+```bash
+croupier ack-fill 8e5dfcc22109ac76 --reason "reconciled with broker; 1500 shares"
+```
+
+A record with no usable id (null, a number, a list) is acknowledged with its
+handle instead: `croupier ack-fill --handle <fill_id> --reason "..."`, shown
+in the journal. Acknowledging only silences the journal; it does not correct
+the ledger (for example, a refused second partial fill leaves the ledger at
+the first fill). The reason is required; it appends `{"kind": "ack_fill", …}` to the audit log
+(the original fill record stays as written). An acknowledgement also retires
+the approval from Pending confirms. Flagged and refused fills never clear a
+pending confirm on their own.
+
 ### `croupier decline` — retire an approved order that will not be placed
 
 ```bash
@@ -145,8 +186,9 @@ lists it (and exits `1`) every day until something retires it. The audit log
 is append-only, so the only way to retire one is another record saying so:
 `decline` appends `{"kind": "decline", "approval_id": …, "reason": …}` after
 the approval, which stays in the trail exactly as written. A reason is
-required — the operator's N is part of the record, not housekeeping. Declining
-an `approval_id` the log has never seen is recorded anyway, flagged
+required — the operator's N is part of the record, not housekeeping. A decline of
+an approval that already has a fill in the ledger is refused (exit `1`, nothing
+recorded). Declining an `approval_id` the log has never seen is recorded anyway, flagged
 `"known": false`, and exits `1`: an unknown id is more likely a typo than a
 decision, and a typo should not silently look like one.
 

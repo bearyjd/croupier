@@ -12,12 +12,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from croupier.audit import AuditLog
+from croupier.audit import AuditLog, valid_approval_id
 from croupier.data import observed_health
 from croupier.data.base import DataHealth
 from croupier.data.factory import build_router
@@ -31,6 +32,20 @@ from croupier.models import AccountSnapshot, OrderIntent, require_finite
 from croupier.policy import load as load_full_policy
 
 AUDIT_PATH = Path("data/audit.jsonl")
+
+# A fill reporting more than this multiple of the approved quantity is not an
+# overfill the operator can reconcile, it is corrupt data (a unit slip, a
+# hostile or garbled report). Up to the factor, the real quantity is recorded
+# and flagged; beyond it, or with a non-finite notional, the fill is refused
+# and flagged, because a recorded 1e308 would poison cost basis and marking.
+MAX_OVERFILL_FACTOR = 10
+# A limit order cannot legitimately fill on the wrong side of its limit; a real
+# broker can still report a little slippage in the average price, so a fill
+# beyond the limit by more than this fraction is recorded but flagged. Beyond
+# MAX_PRICE_FACTOR x the limit in either direction it is corrupt data, refused
+# like an implausible quantity.
+PRICE_SLIP_TOLERANCE = 0.01
+MAX_PRICE_FACTOR = 10
 
 
 def _emit(obj: object) -> None:
@@ -98,6 +113,14 @@ def cmd_fill(payload: dict) -> int:
     approval_id = payload["approval_id"]
     ticker, side = payload["ticker"], payload["side"]
     qty, price = payload["qty"], payload["price"]
+    if valid_approval_id(approval_id) is None:
+        # Nothing can join to this id, and it must not be matched or hashed as
+        # one. It still goes on the record, as text, with a handle to ack it by.
+        log.log_fill(repr(approval_id), ticker, side, qty, price, orphan=True,
+                     flags=("bad_approval_id",))
+        _emit({"logged": True, "ledger": False, "error": (
+            "approval_id must be a non-blank string; recorded as ORPHAN")})
+        return 2
     try:
         if not isinstance(ticker, str) or not isinstance(side, str):
             raise ValueError("ticker and side must be text")
@@ -129,23 +152,119 @@ def cmd_fill(payload: dict) -> int:
         return 1
 
     sleeve = intent["sleeve"]
-    warnings = []
-    if qty > intent.get("qty", qty) + 1e-9:
-        warnings.append(
-            f"overfill: {qty} filled against approved qty {intent.get('qty')}")
-
     fill = new_fill(approval_id, sleeve, ticker, side, qty, price)
+    replay, sleeve_cost = _ledger_view(fill)
+    if not replay:
+        reason = _implausible(intent, qty, price, side, sleeve_cost)
+        if reason:
+            error = (f"implausible fill: {reason}; treated as corrupt data and NOT "
+                     "recorded in the ledger. Stop and report to the operator")
+            return _refuse(log, fill, ("refused", "implausible"), error)
     with Ledger(LEDGER_PATH) as ledger:
         try:
             inserted = ledger.record_fill(fill)
         except LedgerConflict as exc:
-            log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve)
-            _emit({"logged": True, "ledger": False, "error": str(exc)})
-            return 1
-    log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve)
+            return _refuse(log, fill, ("refused",), str(exc))
+    # The ledger must hold what really happened, so a discrepant fill is
+    # recorded at its real quantity and flagged, never refused: refusing would
+    # understate holdings (sells, marking, the drawdown halt).
+    flags, warnings = _fill_flags(log, approval_id, intent, fill)
+    if inserted:   # an identical replay is a harmless repeat: no second record
+        log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve, flags=flags)
     _emit({"logged": True, "ledger": True, "sleeve": sleeve,
-           "new": inserted, "warnings": warnings})
+           "new": inserted, "replay": not inserted,
+           "warnings": warnings})
     return 1 if warnings else 0
+
+
+def _ledger_view(fill) -> tuple[bool, float]:
+    """(is this an identical replay of a recorded fill, sleeve cost basis).
+    The sleeve total bounds every position in it. Does not create the ledger
+    file if there is none."""
+    if not LEDGER_PATH.exists():
+        return False, 0.0
+    with Ledger(LEDGER_PATH) as ledger:
+        for f in ledger.fills():
+            if (f.approval_id == fill.approval_id and f.sleeve == fill.sleeve
+                    and f.ticker == fill.ticker and f.side == fill.side
+                    and abs(f.qty - fill.qty) < 1e-9 and abs(f.price - fill.price) < 1e-9):
+                return True, 0.0
+        return False, sum(p.cost_basis for p in ledger.positions()
+                          if p.sleeve == fill.sleeve)
+
+
+def _implausible(intent: dict, qty: float, price: float, side: str,
+                 sleeve_cost: float) -> str | None:
+    """Why a fill cannot be a real execution of its approval, or None."""
+    if not math.isfinite(qty * price):
+        return f"notional {qty:g} x {price:g} is not finite (cost basis would be corrupt)"
+    notional = qty * price if side == "buy" else 0.0
+    if not math.isfinite(sleeve_cost + notional):
+        return "recording it would make the sleeve cost basis non-finite"
+    approved_qty = intent.get("qty")
+    if (isinstance(approved_qty, (int, float))
+            and qty > _ceiling(MAX_OVERFILL_FACTOR * approved_qty)):
+        return (f"qty {qty:g} is more than {MAX_OVERFILL_FACTOR}x the approved "
+                f"qty {approved_qty:g}")
+    limit = _limit(intent)
+    if limit and (price > _ceiling(MAX_PRICE_FACTOR * limit)
+                  or price < limit / MAX_PRICE_FACTOR / (1 + 1e-9)):
+        return (f"price {price:g} is more than {MAX_PRICE_FACTOR}x away from the "
+                f"approved limit {limit:g}")
+    return None
+
+
+def _ceiling(value: float) -> float:
+    """Absorb float rounding so an exact Nx boundary is not refused (10*623.78
+    is 6237.799999999999)."""
+    return value * (1 + 1e-9)
+
+
+def _limit(intent: dict) -> float | None:
+    limit = intent.get("limit_price")
+    ok = isinstance(limit, (int, float)) and not isinstance(limit, bool)
+    return float(limit) if ok and math.isfinite(limit) and limit > 0 else None
+
+
+def _refuse(log: AuditLog, fill, flags: tuple[str, ...], error: str) -> int:
+    """Refuse a fill. Reporting the identical refused fill again is a replay:
+    answer the same, but do not add a second Needs-action entry."""
+    seen = any(
+        r.get("kind") == "fill" and r.get("refused")
+        and r.get("approval_id") == fill.approval_id
+        and r.get("ticker", "").upper() == fill.ticker and r.get("side") == fill.side
+        and r.get("qty") == fill.qty and r.get("price") == fill.price
+        for r in log.records())
+    if not seen:
+        log.log_fill(fill.approval_id, fill.ticker, fill.side, fill.qty, fill.price,
+                     sleeve=fill.sleeve, flags=flags)
+    _emit({"logged": not seen, "replay": seen, "ledger": False, "error": error})
+    return 1
+
+
+def _fill_flags(log: AuditLog, approval_id: str, intent: dict,
+                fill) -> tuple[tuple[str, ...], list[str]]:
+    flags, warnings = [], []
+    qty, price = fill.qty, fill.price
+    if any(r.get("kind") == "decline" and r.get("approval_id") == approval_id
+           for r in log.records()):
+        flags.append("fill_after_decline")
+        warnings.append(f"fill after decline: approval {approval_id} was declined "
+                        "but the fill is real and is recorded")
+    approved_qty = intent.get("qty", qty)
+    if qty > approved_qty + 1e-9:
+        flags.append("overfill")
+        warnings.append(f"overfill: reported {qty:g} > approved {approved_qty:g}")
+    limit = _limit(intent)
+    if limit and fill.side == "buy" and price > limit * (1 + PRICE_SLIP_TOLERANCE) + 1e-9:
+        flags.append("price_above_limit")
+        warnings.append(f"price above limit: buy filled at {price:g}, limit {limit:g} "
+                        f"(more than {PRICE_SLIP_TOLERANCE:.0%} slip)")
+    if limit and fill.side == "sell" and price < limit * (1 - PRICE_SLIP_TOLERANCE) - 1e-9:
+        flags.append("price_below_limit")
+        warnings.append(f"price below limit: sell filled at {price:g}, limit {limit:g} "
+                        f"(more than {PRICE_SLIP_TOLERANCE:.0%} slip)")
+    return tuple(flags), warnings
 
 
 def cmd_decline(payload: dict) -> int:
@@ -160,6 +279,8 @@ def cmd_decline(payload: dict) -> int:
     """
     log = AuditLog(AUDIT_PATH)
     approval_id = payload["approval_id"]
+    if not isinstance(approval_id, str):
+        approval_id = repr(approval_id)   # recorded as an unknown id, never hashed raw
     reason = str(payload.get("reason", "")).strip()
     if not reason:
         _emit({"logged": False, "error": "a decline needs a reason — it is part of the trail"})
@@ -173,12 +294,51 @@ def cmd_decline(payload: dict) -> int:
             "decline recorded and flagged; nothing was pending under that id")})
         return 1
 
+    if LEDGER_PATH.exists():
+        with Ledger(LEDGER_PATH) as ledger:
+            filled = any(f.approval_id == approval_id for f in ledger.fills())
+        if filled:
+            _emit({"logged": False, "error": (
+                f"approval_id {approval_id!r} already has a fill in the ledger; "
+                "a decline cannot undo it — reconcile with the operator")})
+            return 1
+
     intent = approval.get("intent", {})
     log.log_decline(approval_id, reason)
     _emit({"logged": True, "known": True, "approval_id": approval_id,
            "sleeve": intent.get("sleeve"), "ticker": intent.get("ticker"),
            "side": intent.get("side"), "qty": intent.get("qty"),
            "reason": reason})
+    return 0
+
+
+def cmd_ack_fill(approval_id: str | None, handle: str | None, reason: str) -> int:
+    """Acknowledge a flagged, refused or orphan fill so the journal stops
+    listing it. This only silences the journal: it corrects nothing in the
+    ledger, and the fill's own record stays in the trail unchanged."""
+    from croupier.journal import needs_action
+    reason = reason.strip()
+    if not reason:
+        _emit({"logged": False, "error": "an acknowledgement needs a reason"})
+        return 1
+    if (approval_id is None) == (handle is None):
+        _emit({"logged": False, "error": "give exactly one of approval_id or --handle"})
+        return 1
+    log = AuditLog(AUDIT_PATH)
+    issues = needs_action(log)
+    if handle is not None:
+        hit = [i for i in issues if i.handle == handle]
+    else:
+        approval_id = valid_approval_id(approval_id)
+        hit = [i for i in issues if approval_id and i.match_id == approval_id]
+    if not hit:
+        _emit({"logged": False, "error": (
+            f"no unresolved flagged fill for {handle or approval_id!r}")})
+        return 1
+    log.log_ack_fill(hit[0].match_id if handle is not None else approval_id,
+                     reason, handle=handle)
+    _emit({"logged": True, "reason": reason, "handle": handle,
+           "approval_id": approval_id})
     return 0
 
 
@@ -233,7 +393,8 @@ def cmd_journal() -> int:
     print(f"\n<!-- written to {path} -->")
     # Non-zero when the operator has something to act on, so a cron wrapper
     # can push on the exit code alone.
-    return 1 if (report.pending or report.halts or report.auth.nag) else 0
+    return 1 if (report.pending or report.needs_action or report.halts
+                      or report.auth.nag) else 0
 
 
 def cmd_auth_status() -> int:
@@ -257,11 +418,19 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("fill", help="report a fill (JSON on stdin)")
     sub.add_parser("decline",
                    help="retire an approved order that will not be placed (JSON on stdin)")
+    ack = sub.add_parser("ack-fill",
+                         help="acknowledge a flagged/orphan fill after reconciling it")
+    ack.add_argument("approval_id", nargs="?", default=None)
+    ack.add_argument("--handle", default=None,
+                     help="the fill_id shown in the journal, for a record with no usable id")
+    ack.add_argument("--reason", default="")
     sub.add_parser("mark", help="daily mark-to-market + drawdown halt")
     sub.add_parser("journal", help="render today's operator journal")
     sub.add_parser("auth-status", help="Schwab data-feed token health")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
+    if args.cmd == "ack-fill":
+        return cmd_ack_fill(args.approval_id, args.handle, args.reason)
     if args.cmd == "mark":
         return cmd_mark()
     if args.cmd == "journal":
