@@ -176,7 +176,10 @@ pending confirm on their own.
 
 A buy filled more than 10x *below* its limit (or a sell more than 10x *above*)
 can happen for real after a gap, so it is recorded at the real price and
-flagged `price_better_than_limit`, not refused.
+flagged `price_better_than_limit`, not refused. Beyond 100x
+(`MAX_FAVOURABLE_FACTOR`: a buy below limit/100, a sell above limit x 100) it
+would fake a gain in `mark`, so it is refused as implausible; the operator can
+bring the real fill in with `croupier reconcile`.
 
 ### `croupier reconcile` — operator-only: put a refused fill into the ledger
 
@@ -196,6 +199,21 @@ logic as `fill`, so an oversell is still refused), appends a
 `{"kind": "reconcile", "fill_id": …}` record to the audit log, and resolves the
 Needs action entry. Each fill reconciles at most once. An orphan record that
 names no sleeve cannot be placed. The agent never runs this command.
+
+Bounds: a non-finite notional or sleeve cost basis is **always** refused,
+even with `--force`. Without `--force` it also refuses a qty over 10x the
+approved qty or over 10x the fill's reported qty, an adverse price beyond the
+same 10x band `fill` uses, and a price below 1e-6. A favourable extreme
+(a real gap) is accepted without `--force`. The output and the audit record
+show `reported_qty`/`reported_price` next to `qty`/`price`, and `force`.
+Re-running after a failed audit write is safe: the fill is not inserted twice.
+
+Limits: reconcile uses the record's reported ticker and side, so a garbled
+ticker cannot be corrected with it. A fill already acknowledged with
+`ack-fill` can no longer be reconciled (reconcile first, or ack only once
+the position is right). Reconciling a ticker/side-mismatch orphan under its
+approval_id takes that id in the ledger, so the approval's later real fill
+conflicts and is refused.
 
 ### `croupier decline` — retire an approved order that will not be placed
 

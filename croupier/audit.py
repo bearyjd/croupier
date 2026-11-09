@@ -118,14 +118,17 @@ class AuditLog:
 
     def log_reconcile(self, fill_id: str, approval_id: str, sleeve: str,
                       ticker: str, side: str, qty: float, price: float,
-                      reason: str) -> None:
+                      reason: str, reported_qty: object = None,
+                      reported_price: object = None, force: bool = False) -> None:
         """Record the operator's confirmed values for a refused/orphan fill,
         linked to that fill record by ``fill_id``. Written after the ledger
         insert; it also resolves the fill's Needs-action entry."""
         self._append({"ts": utcnow().isoformat(), "kind": "reconcile",
                       "fill_id": fill_id, "approval_id": approval_id,
                       "sleeve": sleeve, "ticker": ticker, "side": side,
-                      "qty": qty, "price": price, "reason": reason})
+                      "qty": qty, "price": price, "reason": reason,
+                      "reported_qty": reported_qty, "reported_price": reported_price,
+                      "force": force})
 
     def log_decline(self, approval_id: str, reason: str,
                     known: bool = True) -> None:

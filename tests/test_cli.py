@@ -851,24 +851,26 @@ def _refused_handle(workspace, monkeypatch, capsys, qty=11000, price=2.79):
     return verdict["approval_id"], last["fill_id"]
 
 
-def _reconcile(monkeypatch, capsys, handle, qty="11000", price="2.79", reason="broker confirms"):
+def _reconcile(monkeypatch, capsys, handle, qty="1000", price="2.79",
+               reason="broker confirms", force=False):
     return _run(monkeypatch, capsys, ["reconcile", handle, f"--qty={qty}",
-                                      f"--price={price}", f"--reason={reason}"])
+                                      f"--price={price}", f"--reason={reason}"]
+                + (["--force"] if force else []))
 
 
 def test_reconcile_records_a_refused_fill_exactly_once(workspace, monkeypatch, capsys):
     aid, handle = _refused_handle(workspace, monkeypatch, capsys)
     assert not (workspace / "data" / "ledger.db").exists()
-    code, out = _reconcile(monkeypatch, capsys, handle, reason="broker statement: 11000")
+    code, out = _reconcile(monkeypatch, capsys, handle, reason="broker statement: 1000")
     assert code == 0 and out["logged"] is True and out["ledger"] is True, out
-    assert _ledger_qty(workspace) == [11000]
+    assert _ledger_qty(workspace) == [1000]
     with Ledger(workspace / "data" / "ledger.db") as led:
         assert led.fills()[0].approval_id == aid
-        assert led.positions()[0].cost_basis == pytest.approx(11000 * 2.79)
+        assert led.positions()[0].cost_basis == pytest.approx(1000 * 2.79)
     rec = _audit_lines(workspace)[-1]
     assert rec["kind"] == "reconcile" and rec["fill_id"] == handle
-    assert rec["qty"] == 11000 and rec["price"] == 2.79
-    assert rec["reason"] == "broker statement: 11000" and rec["approval_id"] == aid
+    assert rec["qty"] == 1000 and rec["price"] == 2.79
+    assert rec["reason"] == "broker statement: 1000" and rec["approval_id"] == aid
     capsys.readouterr()
     assert cli.main(["journal"]) == 0          # resolved: no longer Needs action
     capsys.readouterr()
@@ -876,7 +878,7 @@ def test_reconcile_records_a_refused_fill_exactly_once(workspace, monkeypatch, c
     n = len(_audit_lines(workspace))
     code, out = _reconcile(monkeypatch, capsys, handle)
     assert code == 1 and out["logged"] is False
-    assert _ledger_qty(workspace) == [11000] and len(_audit_lines(workspace)) == n
+    assert _ledger_qty(workspace) == [1000] and len(_audit_lines(workspace)) == n
 
 
 def test_reconcile_may_record_operator_values_not_the_reported_ones(
@@ -965,3 +967,122 @@ def test_reconcile_is_listed_as_operator_only_for_the_agent():
     text = (REPO / "croupier" / "executor" / "AGENT.md").read_text()
     hard = text[text.index("## Hard prohibitions"):]
     assert "croupier reconcile" in hard.split("- Never trade")[0]
+
+
+# --- review round: reconcile bounds, idempotency, favourable floor ---------------
+
+@pytest.mark.parametrize("force", [False, True])
+def test_reconcile_never_records_a_non_finite_notional(workspace, monkeypatch, capsys, force):
+    _, handle = _refused_handle(workspace, monkeypatch, capsys)
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="1e200", price="1e200", force=force)
+    assert code == 1 and out["logged"] is False and "finite" in out["error"]
+    assert not (workspace / "data" / "ledger.db").exists()
+
+
+def test_reconcile_never_makes_the_sleeve_cost_basis_non_finite_even_forced(
+        workspace, monkeypatch, capsys):
+    _plant_approval(workspace, "c1", 1e154, 0.9e154)
+    _plant_approval(workspace, "c2", 1e154, 0.9e154)
+    _run(monkeypatch, capsys, ["fill"], _fill_at("c1", 1e154, 0.9e154))
+    _run(monkeypatch, capsys, ["fill"], _fill_at("c2", 1e154, 0.9e154))
+    handle = _audit_lines(workspace)[-1]["fill_id"]
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="1e154", price="0.9e154", force=True)
+    assert code == 1 and out["logged"] is False and "cost basis" in out["error"]
+    assert len(_ledger_qty(workspace)) == 1
+
+
+def test_reconcile_refuses_qty_far_over_approved_unless_forced(workspace, monkeypatch, capsys):
+    _, handle = _refused_handle(workspace, monkeypatch, capsys)       # approved 1000
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="1000000")
+    assert code == 1 and out["logged"] is False and "--force" in out["error"]
+    assert not (workspace / "data" / "ledger.db").exists()
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="1000000", force=True)
+    assert code == 0 and out["force"] is True
+    assert out["reported_qty"] == 11000 and out["reported_price"] == 2.79
+    rec = _audit_lines(workspace)[-1]
+    assert rec["force"] is True and rec["reported_qty"] == 11000 and rec["qty"] == 1000000
+    assert rec["reported_price"] == 2.79
+
+
+def test_reconcile_refuses_qty_far_over_the_reported_qty_unless_forced(
+        workspace, monkeypatch, capsys):
+    _plant_approval(workspace, "big", 100000, 2.80)
+    _run(monkeypatch, capsys, ["fill"], _fill_at("big", 1_000_001, 2.79))      # >10x: refused
+    handle = _audit_lines(workspace)[-1]["fill_id"]
+    _plant_approval(workspace, "ghost", 1, 2.80)
+    _run(monkeypatch, capsys, ["fill"], {**_fill_at("ghost", 5, 2.8), "ticker": "OTHER"})
+    h2 = _audit_lines(workspace)[-1]["fill_id"]                      # orphan, reported 5
+    code, out = _reconcile(monkeypatch, capsys, h2, qty="500", price="2.8")
+    assert code == 1 and "reported" in out["error"] and "--force" in out["error"]
+    code, out = _reconcile(monkeypatch, capsys, h2, qty="500", price="2.8", force=True)
+    assert code == 0 and handle
+
+
+def test_reconcile_refuses_adverse_price_unless_forced(workspace, monkeypatch, capsys):
+    _, handle = _refused_handle(workspace, monkeypatch, capsys, qty=1000, price=31.0)
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="1000", price="31.0")
+    assert code == 1 and "--force" in out["error"]
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="1000", price="31.0", force=True)
+    assert code == 0
+
+
+def test_reconcile_accepts_a_favourable_extreme_but_not_below_the_price_floor(
+        workspace, monkeypatch, capsys):
+    _, handle = _refused_handle(workspace, monkeypatch, capsys, qty=1000, price=5e-324)
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="1000", price="1e-7")
+    assert code == 1 and "--force" in out["error"] and "floor" in out["error"]
+    code, out = _reconcile(monkeypatch, capsys, handle, qty="1000", price="0.01")   # 280x gap
+    assert code == 0 and out["force"] is False
+
+
+def test_failed_audit_write_then_rerun_records_the_fill_once(workspace, monkeypatch, capsys):
+    from croupier.audit import AuditLog
+    _, handle = _refused_handle(workspace, monkeypatch, capsys)
+    real = AuditLog.log_reconcile
+
+    def boom(self, *a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(AuditLog, "log_reconcile", boom)
+    with pytest.raises(OSError):
+        _reconcile(monkeypatch, capsys, handle)
+    assert _ledger_qty(workspace) == [1000]
+    monkeypatch.setattr(AuditLog, "log_reconcile", real)
+    code, out = _reconcile(monkeypatch, capsys, handle)
+    assert code == 0 and _ledger_qty(workspace) == [1000]
+    assert _audit_lines(workspace)[-1]["kind"] == "reconcile"
+
+
+def test_failed_audit_write_with_taken_key_rerun_records_the_fill_once(
+        workspace, monkeypatch, capsys):
+    from croupier.audit import AuditLog
+    aid, handle = _refused_handle(workspace, monkeypatch, capsys)
+    _run(monkeypatch, capsys, ["fill"], _fill_payload({"approval_id": aid}, 1000, price=2.80))
+    # the refused fill is still open; it reconciles under reconcile:<fid>
+    real = AuditLog.log_reconcile
+    monkeypatch.setattr(AuditLog, "log_reconcile",
+                        lambda self, *a, **k: (_ for _ in ()).throw(OSError("x")))
+    with pytest.raises(OSError):
+        _reconcile(monkeypatch, capsys, handle)
+    monkeypatch.setattr(AuditLog, "log_reconcile", real)
+    code, _ = _reconcile(monkeypatch, capsys, handle)
+    assert code == 0 and sorted(_ledger_qty(workspace)) == [1000, 1000]
+
+
+@pytest.mark.parametrize("price, refused", [
+    (0.028, False), (0.0279, True), (0.0277, True), (5e-324, True), (0.2, False)])
+def test_buy_favourable_bound_is_limit_over_100(workspace, monkeypatch, capsys, price, refused):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())        # limit 2.80
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_payload(verdict, 1000, price=price))
+    assert (out["ledger"] is False) is refused
+    if refused:
+        last = _audit_lines(workspace)[-1]
+        assert last["refused"] is True and last["implausible"] is True
+
+
+@pytest.mark.parametrize("price, refused", [(200.0, False), (200.5, True), (1e300, True)])
+def test_sell_favourable_bound_is_limit_times_100(workspace, monkeypatch, capsys, price, refused):
+    _plant_approval(workspace, "buy1", 1000, 2.80)
+    _plant_approval(workspace, "sell1", 500, 2.0, side="sell")
+    _run(monkeypatch, capsys, ["fill"], _fill_at("buy1", 1000, 2.80))
+    code, out = _run(monkeypatch, capsys, ["fill"], _fill_at("sell1", 500, price, "sell"))
+    assert (out["ledger"] is False) is refused
