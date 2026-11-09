@@ -129,30 +129,39 @@ def cmd_fill(payload: dict) -> int:
         return 1
 
     sleeve = intent["sleeve"]
-    discrepancy = None
-    if any(r.get("kind") == "decline" and r.get("approval_id") == approval_id
-           for r in log.records()):
-        discrepancy = f"approval {approval_id} was declined"
-    elif qty > intent.get("qty", qty) + 1e-9:
-        discrepancy = f"overfill: {qty:g} exceeds approved quantity {intent.get('qty'):g}"
-    if discrepancy:
-        log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve, orphan=True)
-        _emit({"logged": True, "ledger": False,
-               "error": f"{discrepancy}; recorded as ORPHAN and refused by the ledger"})
-        return 1
-
     fill = new_fill(approval_id, sleeve, ticker, side, qty, price)
     with Ledger(LEDGER_PATH) as ledger:
         try:
             inserted = ledger.record_fill(fill)
         except LedgerConflict as exc:
-            log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve)
+            log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve,
+                         flags=("refused",))
             _emit({"logged": True, "ledger": False, "error": str(exc)})
             return 1
-    log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve)
+    # The ledger must hold what really happened, so a discrepant fill is
+    # recorded at its real quantity and flagged, never refused: refusing would
+    # understate holdings (cost-basis caps, marking, the drawdown halt).
+    flags, warnings = _fill_flags(log, approval_id, intent, qty)
+    if inserted:   # an identical replay is a harmless repeat: no second record
+        log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve, flags=flags)
     _emit({"logged": True, "ledger": True, "sleeve": sleeve,
-           "new": inserted, "warnings": []})
-    return 0
+           "new": inserted, "warnings": warnings})
+    return 1 if warnings else 0
+
+
+def _fill_flags(log: AuditLog, approval_id: str, intent: dict,
+                qty: float) -> tuple[tuple[str, ...], list[str]]:
+    flags, warnings = [], []
+    if any(r.get("kind") == "decline" and r.get("approval_id") == approval_id
+           for r in log.records()):
+        flags.append("fill_after_decline")
+        warnings.append(f"fill after decline: approval {approval_id} was declined "
+                        "but the fill is real and is recorded")
+    approved_qty = intent.get("qty", qty)
+    if qty > approved_qty + 1e-9:
+        flags.append("overfill")
+        warnings.append(f"overfill: reported {qty:g} > approved {approved_qty:g}")
+    return tuple(flags), warnings
 
 
 def cmd_decline(payload: dict) -> int:
@@ -180,12 +189,39 @@ def cmd_decline(payload: dict) -> int:
             "decline recorded and flagged; nothing was pending under that id")})
         return 1
 
+    if LEDGER_PATH.exists():
+        with Ledger(LEDGER_PATH) as ledger:
+            filled = any(f.approval_id == approval_id for f in ledger.fills())
+        if filled:
+            _emit({"logged": False, "error": (
+                f"approval_id {approval_id!r} already has a fill in the ledger; "
+                "a decline cannot undo it — reconcile with the operator")})
+            return 1
+
     intent = approval.get("intent", {})
     log.log_decline(approval_id, reason)
     _emit({"logged": True, "known": True, "approval_id": approval_id,
            "sleeve": intent.get("sleeve"), "ticker": intent.get("ticker"),
            "side": intent.get("side"), "qty": intent.get("qty"),
            "reason": reason})
+    return 0
+
+
+def cmd_ack_fill(approval_id: str, reason: str) -> int:
+    """Acknowledge a flagged, refused or orphan fill so the journal stops
+    listing it. The fill's own record stays in the trail unchanged."""
+    from croupier.journal import needs_action
+    reason = reason.strip()
+    if not reason:
+        _emit({"logged": False, "error": "an acknowledgement needs a reason"})
+        return 1
+    log = AuditLog(AUDIT_PATH)
+    if not any(n.approval_id == approval_id for n in needs_action(log)):
+        _emit({"logged": False, "error": (
+            f"no unresolved flagged fill for approval_id {approval_id!r}")})
+        return 1
+    log.log_ack_fill(approval_id, reason)
+    _emit({"logged": True, "approval_id": approval_id, "reason": reason})
     return 0
 
 
@@ -240,7 +276,8 @@ def cmd_journal() -> int:
     print(f"\n<!-- written to {path} -->")
     # Non-zero when the operator has something to act on, so a cron wrapper
     # can push on the exit code alone.
-    return 1 if (report.pending or report.halts or report.auth.nag) else 0
+    return 1 if (report.pending or report.needs_action or report.halts
+                      or report.auth.nag) else 0
 
 
 def cmd_auth_status() -> int:
@@ -264,11 +301,17 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("fill", help="report a fill (JSON on stdin)")
     sub.add_parser("decline",
                    help="retire an approved order that will not be placed (JSON on stdin)")
+    ack = sub.add_parser("ack-fill",
+                         help="acknowledge a flagged/orphan fill after reconciling it")
+    ack.add_argument("approval_id")
+    ack.add_argument("--reason", default="")
     sub.add_parser("mark", help="daily mark-to-market + drawdown halt")
     sub.add_parser("journal", help="render today's operator journal")
     sub.add_parser("auth-status", help="Schwab data-feed token health")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
+    if args.cmd == "ack-fill":
+        return cmd_ack_fill(args.approval_id, args.reason)
     if args.cmd == "mark":
         return cmd_mark()
     if args.cmd == "journal":

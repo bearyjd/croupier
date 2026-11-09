@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from croupier.catalysts import CatalystEvent
 from croupier.data.base import DataHealth
-from croupier.journal import JournalReport, PendingConfirm, SleeveLine
+from croupier.journal import FillIssue, JournalReport, PendingConfirm, SleeveLine
 
 _HEALTH_BANNER = {
     DataHealth.FRESH: None,
@@ -52,6 +52,15 @@ def render(report: JournalReport) -> str:
     if report.pending:
         out += ["Approved, awaiting an explicit Y. Nothing here has been placed.", ""]
         out += [_pending_block(p) for p in report.pending]
+    else:
+        out += ["_none_"]
+    out += [""]
+
+    out += [f"## Needs action ({len(report.needs_action)})", ""]
+    if report.needs_action:
+        out += ["Fills that need reconciling. Stop trading on these tickers until "
+                "resolved; then `croupier ack-fill <approval_id> --reason \"...\"`.", ""]
+        out += [_issue_block(i) for i in report.needs_action]
     else:
         out += ["_none_"]
     out += [""]
@@ -98,6 +107,13 @@ def _sleeve_block(s: SleeveLine) -> str:
     if not s.positions:
         lines.append("    - no open positions")
     return "\n".join(lines)
+
+
+def _issue_block(i: FillIssue) -> str:
+    return "\n".join([
+        f"- `{i.approval_id}` {i.side} {i.qty} {i.ticker} — reported {i.ts}",
+        *[f"    - {p}" for p in i.problems],
+    ])
 
 
 def _pending_block(p: PendingConfirm) -> str:

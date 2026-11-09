@@ -64,6 +64,40 @@ class AuthStatus:
 
 
 @dataclass(frozen=True)
+class FillIssue:
+    """A fill the operator must reconcile: flagged, refused, or orphaned."""
+    approval_id: str
+    ts: str
+    ticker: str
+    side: str
+    qty: float
+    problems: tuple[str, ...]
+
+
+_PROBLEMS = (("orphan", "ORPHAN (no matching approval; not in the ledger)"),
+             ("refused", "REFUSED by the ledger (conflicts with the recorded fill)"),
+             ("fill_after_decline", "fill after decline (recorded in the ledger)"),
+             ("overfill", "overfill (recorded in the ledger at the reported qty)"))
+
+
+def needs_action(audit: AuditLog) -> tuple[FillIssue, ...]:
+    """Flagged, refused and orphan fills with no later ``ack_fill``."""
+    open_issues: list[FillIssue] = []
+    for rec in audit.records():
+        if rec.get("kind") == "fill":
+            problems = tuple(text for key, text in _PROBLEMS if rec.get(key))
+            if problems:
+                open_issues.append(FillIssue(
+                    approval_id=rec.get("approval_id"), ts=rec.get("ts", ""),
+                    ticker=str(rec.get("ticker")), side=str(rec.get("side")),
+                    qty=rec.get("qty"), problems=problems))
+        elif rec.get("kind") == "ack_fill":
+            open_issues = [i for i in open_issues
+                           if str(i.approval_id) != str(rec.get("approval_id"))]
+    return tuple(open_issues)
+
+
+@dataclass(frozen=True)
 class JournalReport:
     as_of: date
     data_health: DataHealth
@@ -73,6 +107,7 @@ class JournalReport:
     sleeves: tuple[SleeveLine, ...]
     pending: tuple[PendingConfirm, ...]
     halts: tuple[Halt, ...]
+    needs_action: tuple[FillIssue, ...] = ()
     freezes: tuple[CatalystEvent, ...] = ()   # active catalyst freezes today
     freeze_trading_days: int = 0
 
@@ -111,9 +146,11 @@ def pending_confirms(audit: AuditLog) -> tuple[PendingConfirm, ...]:
     for rec in audit.records():
         if rec.get("kind") == "check" and rec.get("approved") and rec.get("requires_confirm"):
             approved[rec["approval_id"]] = rec
-        elif rec.get("kind") == "fill" and not rec.get("orphan"):
+        elif (rec.get("kind") == "fill"
+              and not any(rec.get(k) for k, _ in _PROBLEMS)):
             fills.append(rec)
-        elif rec.get("kind") == "decline":
+        elif rec.get("kind") in ("decline", "ack_fill"):
+            # an acknowledgement is the operator saying they reconciled it
             declined.add(rec.get("approval_id"))
     # A fill clears a pending confirm only if it actually matches the approval:
     # same ticker and side, within the approved quantity.
@@ -175,6 +212,7 @@ def build(policy: Policy, ledger: Ledger, audit: AuditLog,
         account_snapshot_ts=snapshot_ts,
         sleeves=tuple(lines),
         pending=pending_confirms(audit),
+        needs_action=needs_action(audit),
         halts=tuple(sorted(policy.state.halts.values(), key=lambda h: h.sleeve)),
         freezes=policy.catalysts.freezes_on(day),
         freeze_trading_days=policy.catalysts.freeze_trading_days,

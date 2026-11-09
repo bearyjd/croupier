@@ -81,13 +81,24 @@ class AuditLog:
 
     def log_fill(self, approval_id: str, ticker: str, side: str,
                  qty: float, price: float, sleeve: str | None = None,
-                 orphan: bool = False) -> None:
+                 orphan: bool = False, flags: tuple[str, ...] = ()) -> None:
         """Record a fill. An orphan fill (no matching approval) is still
-        logged — an ungated trade is precisely what the audit trail is for."""
+        logged — an ungated trade is precisely what the audit trail is for.
+
+        ``flags`` marks a fill that reached (or was refused by) the ledger but
+        needs an operator: ``overfill``, ``fill_after_decline``, ``refused``.
+        Each becomes a ``<flag>: true`` field.
+        """
         self._append({"ts": utcnow().isoformat(), "kind": "fill",
                       "approval_id": approval_id, "sleeve": sleeve,
                       "ticker": ticker, "side": side, "qty": qty,
-                      "price": price, "orphan": orphan})
+                      "price": price, "orphan": orphan,
+                      **{flag: True for flag in flags}})
+
+    def log_ack_fill(self, approval_id: str, reason: str) -> None:
+        """Record the operator's acknowledgement of a flagged/orphan fill."""
+        self._append({"ts": utcnow().isoformat(), "kind": "ack_fill",
+                      "approval_id": approval_id, "reason": reason})
 
     def log_decline(self, approval_id: str, reason: str,
                     known: bool = True) -> None:

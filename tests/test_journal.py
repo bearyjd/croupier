@@ -98,13 +98,40 @@ def test_orphan_fill_does_not_clear_a_pending_confirm(tmp_path, audit, ledger):
     ("ACME", "sell", 1000),      # wrong side
     ("BRVO", "buy", 1000),       # wrong ticker
     ("ACME", "buy", 999999),     # overfill
+    ("ACME", "buy", 1001),       # just over the approved 1000
 ])
 def test_fill_that_does_not_match_its_approval_does_not_clear_a_pending_confirm(
         tmp_path, audit, ledger, ticker, side, qty):
     audit._append(_check_record("a1"))
-    audit.log_fill("a1", ticker, side, qty, 2.79, sleeve="event_driven")  # not flagged orphan
+    audit.log_fill("a1", ticker, side, qty, 2.79, sleeve="event_driven")  # not flagged
     report = _build(tmp_path, audit, ledger)
     assert [p.approval_id for p in report.pending] == ["a1"]
+
+
+@pytest.mark.parametrize("flag", ["overfill", "fill_after_decline", "refused"])
+def test_flagged_or_refused_fills_do_not_clear_a_pending_confirm(
+        tmp_path, audit, ledger, flag):
+    audit._append(_check_record("a1"))
+    audit.log_fill("a1", "ACME", "buy", 1000, 2.79, sleeve="event_driven", flags=(flag,))
+    report = _build(tmp_path, audit, ledger)
+    assert [p.approval_id for p in report.pending] == ["a1"]
+
+
+def test_needs_action_lists_flagged_orphan_and_refused_fills_until_acked(
+        tmp_path, audit, ledger):
+    audit._append(_check_record("a1"))
+    audit.log_fill("a1", "ACME", "buy", 1500, 2.79, sleeve="event_driven", flags=("overfill",))
+    audit.log_fill("a2", "ACME", "buy", 10, 2.79, orphan=True)
+    audit.log_fill("a3", "ACME", "buy", 10, 2.79, flags=("refused",))
+    audit.log_fill("a4", "ACME", "buy", 10, 2.79)                      # clean: not listed
+    report = _build(tmp_path, audit, ledger)
+    assert sorted(n.approval_id for n in report.needs_action) == ["a1", "a2", "a3"]
+    text = render(report)
+    assert "Needs action (3)" in text and "overfill" in text and "ORPHAN" in text
+
+    audit.log_ack_fill("a1", "reconciled against broker")
+    report = _build(tmp_path, audit, ledger)
+    assert sorted(n.approval_id for n in report.needs_action) == ["a2", "a3"]
 
 
 def test_declined_approval_is_no_longer_pending(tmp_path, audit, ledger):

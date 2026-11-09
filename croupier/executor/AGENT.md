@@ -23,6 +23,12 @@ change means a new thesis, which means a new check with updated signal_refs.
    the operator in the sleeve's REPORTING FORMAT and wait for explicit Y.
 5. Place via Robinhood MCP as a LIMIT order. Never market orders.
 6. On fill notification: `croupier fill` with approval_id, qty, price.
+   If `fill` exits non-zero or prints `warnings` or an `error` (overfill,
+   fill after decline, refused, orphan), STOP: report the full output to the
+   operator and do not retry or place further orders on that ticker. A real
+   fill is recorded in the ledger even when flagged; the operator reconciles
+   it and clears it with `croupier ack-fill`. Never decline an approval that
+   has already filled.
 
 ## Hard prohibitions
 
