@@ -203,10 +203,16 @@ names no sleeve cannot be placed. The agent never runs this command.
 Bounds: a non-finite notional or sleeve cost basis is **always** refused,
 even with `--force`. Without `--force` it also refuses a qty over 10x the
 approved qty or over 10x the fill's reported qty, an adverse price beyond the
-same 10x band `fill` uses, and a price below 1e-6. A favourable extreme
-(a real gap) is accepted without `--force`. The output and the audit record
+same 10x band `fill` uses, and a price below 1e-6. A favourable price
+beyond 100x the limit (buy below limit/100, sell above limit x 100) also needs
+`--force`, so a typo is caught while a real gap can still be asserted. The output and the audit record
 show `reported_qty`/`reported_price` next to `qty`/`price`, and `force`.
-Re-running after a failed audit write is safe: the fill is not inserted twice.
+Re-running after a failed audit write is safe: reconcile first logs an
+intent for the fill's ledger key, so a re-run recognises its own row
+(`inserted: false`) and never merges into another fill's row. A second partial
+fill refused for a conflict is added as its own row (`reconcile:<fill_id>`).
+`inserted` is in the output and the audit record. A reconcile made with
+`--force` appears in the journal's **Forced reconciles** section for 24 hours.
 
 Limits: reconcile uses the record's reported ticker and side, so a garbled
 ticker cannot be corrected with it. A fill already acknowledged with

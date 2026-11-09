@@ -13,7 +13,7 @@ rather than implying a live number.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from croupier.audit import AuditLog, valid_approval_id
@@ -135,6 +135,43 @@ def needs_action(audit: AuditLog) -> tuple[FillIssue, ...]:
 
 
 @dataclass(frozen=True)
+class ForcedReconcile:
+    """A reconcile the operator forced past the plausibility bands."""
+    fill_id: str
+    ts: str
+    ticker: str
+    side: str
+    qty: float
+    price: float
+    reported_qty: object
+    reported_price: object
+    reason: str
+
+
+FORCED_RECONCILE_WINDOW = timedelta(hours=24)
+
+
+def forced_reconciles(audit: AuditLog, now: datetime) -> tuple[ForcedReconcile, ...]:
+    """Reconciles with force:true in the last 24h, so --force use is visible
+    beyond the audit log."""
+    out = []
+    for rec in audit.records():
+        if rec.get("kind") != "reconcile" or not rec.get("force"):
+            continue
+        try:
+            ts = datetime.fromisoformat(rec["ts"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if now - ts <= FORCED_RECONCILE_WINDOW:
+            out.append(ForcedReconcile(
+                str(rec.get("fill_id")), rec["ts"], str(rec.get("ticker")),
+                str(rec.get("side")), rec.get("qty"), rec.get("price"),
+                rec.get("reported_qty"), rec.get("reported_price"),
+                str(rec.get("reason"))))
+    return tuple(out)
+
+
+@dataclass(frozen=True)
 class JournalReport:
     as_of: date
     data_health: DataHealth
@@ -145,6 +182,7 @@ class JournalReport:
     pending: tuple[PendingConfirm, ...]
     halts: tuple[Halt, ...]
     needs_action: tuple[FillIssue, ...] = ()
+    forced: tuple[ForcedReconcile, ...] = ()
     freezes: tuple[CatalystEvent, ...] = ()   # active catalyst freezes today
     freeze_trading_days: int = 0
 
@@ -253,6 +291,7 @@ def build(policy: Policy, ledger: Ledger, audit: AuditLog,
         sleeves=tuple(lines),
         pending=pending_confirms(audit),
         needs_action=needs_action(audit),
+        forced=forced_reconciles(audit, now or datetime.now(UTC)),
         halts=tuple(sorted(policy.state.halts.values(), key=lambda h: h.sleeve)),
         freezes=policy.catalysts.freezes_on(day),
         freeze_trading_days=policy.catalysts.freeze_trading_days,

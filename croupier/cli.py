@@ -439,25 +439,53 @@ def cmd_reconcile(handle: str, qty: float, price: float, reason: str,
             "values with the broker, repeat with --force")})
         return 1
     with Ledger(LEDGER_PATH) as ledger:
-        fill = _reconcile_fill(ledger, approval_id, handle, sleeve, ticker, side, qty, price)
-        replay = fill.approval_id in {f.approval_id for f in ledger.fills()
-                                      if _same_fill(f, fill)}
+        intent_key = next((r.get("ledger_key") for r in log.records()
+                           if r.get("kind") == "event" and r.get("event") == "reconcile_intent"
+                           and r.get("fill_id") == handle), None)
+        held = {f.approval_id: f for f in ledger.fills()}
+        if intent_key is not None:
+            fill = new_fill(intent_key, sleeve, ticker, side, qty, price)
+        else:
+            # The original approval_id when free (a later re-report of that
+            # approval then conflicts instead of double counting); otherwise a
+            # key tied to this fill. Never an existing row: that is a
+            # different fill, and matching it would silently merge the two.
+            key = (approval_id if approval_id and approval_id not in held
+                   else f"reconcile:{handle}")
+            if key in held:
+                _emit({"logged": False, "ledger": False, "error": (
+                    f"ledger key {key!r} is already taken by another fill")})
+                return 1
+            fill = new_fill(key, sleeve, ticker, side, qty, price)
+        # A row under the key this fill's own intent chose, with the same
+        # values, is a re-run after a failed audit write: this fill, already in.
+        replay = intent_key in held and _same_fill(held[intent_key], fill)
         if not replay:
             cost = sum(p.cost_basis for p in ledger.positions() if p.sleeve == sleeve)
             bad = _non_finite(qty, price, side, cost)
             if bad:
                 _emit({"logged": False, "ledger": False, "error": f"{bad}; never forceable"})
                 return 1
+            if intent_key is None:   # audit before the ledger: a failed write aborts here
+                log.log_event("reconcile_intent",
+                              {"fill_id": handle, "ledger_key": fill.approval_id})
         try:
-            ledger.record_fill(fill)
+            inserted = ledger.record_fill(fill)
         except LedgerConflict as exc:
             _emit({"logged": False, "ledger": False, "error": str(exc)})
             return 1
+        if not inserted and not replay:
+            _emit({"logged": False, "ledger": False, "error": (
+                "nothing was inserted and this is not provably a replay of this "
+                "fill; the issue stays open")})
+            return 1
     log.log_reconcile(handle, str(rec.get("approval_id")), sleeve, ticker.upper(),
-                      side, qty, price, reason, rec.get("qty"), rec.get("price"), force)
-    _emit({"logged": True, "ledger": True, "fill_id": handle, "sleeve": sleeve,
-           "qty": qty, "price": price, "reported_qty": rec.get("qty"),
-           "reported_price": rec.get("price"), "force": force, "reason": reason})
+                      side, qty, price, reason, rec.get("qty"), rec.get("price"), force,
+                      inserted)
+    _emit({"logged": True, "ledger": True, "inserted": inserted, "fill_id": handle,
+           "sleeve": sleeve, "qty": qty, "price": price,
+           "reported_qty": rec.get("qty"), "reported_price": rec.get("price"),
+           "force": force, "reason": reason})
     return 0
 
 
@@ -466,28 +494,11 @@ def _same_fill(a, b) -> bool:
             and abs(a.qty - b.qty) < 1e-9 and abs(a.price - b.price) < 1e-9)
 
 
-def _reconcile_fill(ledger: Ledger, approval_id: str | None, handle: str,
-                    sleeve: str, ticker: str, side: str, qty: float, price: float):
-    """The fill to insert, under a key that makes a re-run idempotent.
-
-    Candidate keys: the original approval_id (so a later re-report of the same
-    approval cannot double count) and ``reconcile:<fill_id>``. A candidate that
-    already holds this exact fill (a run whose audit write failed) is reused;
-    otherwise the first free one is taken."""
-    cands = ([approval_id] if approval_id else []) + [f"reconcile:{handle}"]
-    held = {f.approval_id: f for f in ledger.fills()}
-    for key in cands:
-        fill = new_fill(key, sleeve, ticker, side, qty, price)
-        if key in held and _same_fill(held[key], fill):
-            return fill
-    key = next((k for k in cands if k not in held), cands[-1])
-    return new_fill(key, sleeve, ticker, side, qty, price)
-
-
 def _reconcile_band_problems(rec: dict, intent: dict, qty: float, price: float,
                              side: str) -> list[str]:
     problems = []
-    for reason in (_out_of_band(intent, qty, price, side),):
+    for reason in (_out_of_band(intent, qty, price, side),
+                   _too_favourable(intent, price, side)):
         if reason:
             problems.append(reason)
     reported = rec.get("qty")

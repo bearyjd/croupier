@@ -66,6 +66,15 @@ def render(report: JournalReport) -> str:
         out += ["_none_"]
     out += [""]
 
+    if report.forced:
+        out += [f"## Forced reconciles, last 24h ({len(report.forced)})", "",
+                "FLAGGED: the operator lifted the plausibility bands with `--force`.", ""]
+        for f in report.forced:
+            out += [f"- `{f.fill_id}` {f.side} {f.ticker}: recorded {f.qty:,.0f} @ "
+                    f"{f.price} (reported {f.reported_qty} @ {f.reported_price}) "
+                    f"at {f.ts}", f"    - reason: {f.reason}"]
+        out += [""]
+
     out += [f"## Halts ({len(report.halts)})", ""]
     if report.halts:
         out += ["Clearing a halt is a human act: review, then delete the entry "
