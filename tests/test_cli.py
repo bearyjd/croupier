@@ -123,6 +123,18 @@ def test_rejected_check_yields_no_approval_id(workspace, monkeypatch, capsys):
     assert code == 1 and not verdict["approved"] and verdict["approval_id"] is None
 
 
+def test_fill_with_null_approval_id_cannot_join_a_rejected_check(
+        workspace, monkeypatch, capsys):
+    """A rejected check logs approval_id null; a null id must not match it."""
+    _run(monkeypatch, capsys, ["check"], _order(venue="schwab"))
+    code, out = _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": None, "ticker": "ACME", "side": "buy",
+        "qty": 1, "price": 1.0})
+    assert code == 1 and out["ledger"] is False
+    assert not (workspace / "data" / "ledger.db").exists() or not any(
+        Ledger(workspace / "data" / "ledger.db").positions())
+
+
 def test_check_requires_signal_refs(workspace, monkeypatch, capsys):
     with pytest.raises(ValueError, match="signal_refs"):
         _run(monkeypatch, capsys, ["check"], _order(signal_refs=[]))
