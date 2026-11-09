@@ -12,6 +12,7 @@ over policy.yaml. Clearing it is a human act: the code never un-halts.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from datetime import date
@@ -24,6 +25,8 @@ from croupier.drawdown import EquityPoint, advance
 from croupier.ledger import Ledger, Position
 from croupier.models import utcnow
 from croupier.state import Halt, SleeveState
+
+log = logging.getLogger(__name__)
 
 # Quoted by `mark` when the book is empty, so data health is observed rather
 # than defaulted. One credit a day on the EOD floor; any liquid ticker works.
@@ -76,6 +79,7 @@ async def mark_to_market(
 
     marks: list[SleeveMark] = []
     next_state = state
+    any_unpriced = False
     for sleeve in sorted({p.sleeve for p in positions} | set(ledger.sleeves())):
         held = [p for p in positions if p.sleeve == sleeve]
         values = {p.ticker: _priced_value(p, quotes.get(p.ticker)) for p in held}
@@ -142,8 +146,12 @@ async def mark_to_market(
                     "drawdown_pct": halt.drawdown_pct,
                     "twr_index": point.twr_index, "hwm_index": point.hwm_index,
                 })
-        if pending_event is not None and audit is not None:
-            audit.log_event(*pending_event)
+        if pending_event is not None:
+            _log_event(audit, *pending_event)
+        if unpriced:
+            _log_event(audit, "unpriced_carried_at_cost", {
+                "sleeve": sleeve, "tickers": list(unpriced)})
+            any_unpriced = True
 
         marks.append(SleeveMark(
             sleeve=sleeve,
@@ -156,6 +164,9 @@ async def mark_to_market(
         ))
 
     health = router.health()
+    if any_unpriced and health == DataHealth.FRESH:
+        # Holdings valued at cost are not "fresh" data, whatever the source says.
+        health = DataHealth.DEGRADED
     if probe:
         # Only persisted when this call genuinely queried something —
         # either the open positions or, on an empty book, the canary. With
@@ -168,6 +179,17 @@ async def mark_to_market(
         as_of=day, data_health=health,
         marks=tuple(marks), state=next_state,
     )
+
+
+def _log_event(audit: AuditLog | None, event: str, detail: dict) -> None:
+    """Audit is logging, not safety state: a failed write is reported and the
+    mark carries on, so later sleeves are still evaluated."""
+    if audit is None:
+        return
+    try:
+        audit.log_event(event, detail)
+    except Exception:                                      # noqa: BLE001
+        log.exception("audit write failed for %s; continuing", event)
 
 
 def _priced_value(position: Position, quote: Quote | None) -> float | None:

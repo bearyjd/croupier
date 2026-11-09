@@ -37,6 +37,21 @@ def _clean(value: object) -> object:
     return value
 
 
+def _safe_clean(record: dict) -> dict:
+    """_clean, but a value nested past the recursion limit is summarised
+    rather than raised: the record must still be written."""
+    try:
+        return _clean(record)
+    except RecursionError:
+        out = {}
+        for key, value in record.items():
+            try:
+                out[key] = _clean(value)
+            except RecursionError:
+                out[key] = "<value too deeply nested to log>"
+        return out
+
+
 class AuditLog:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -137,6 +152,6 @@ class AuditLog:
 
     def _append(self, record: dict) -> None:
         with open(self.path, "a") as f:
-            f.write(json.dumps(_clean(record), default=str, allow_nan=False) + "\n")
+            f.write(json.dumps(_safe_clean(record), default=str, allow_nan=False) + "\n")
             f.flush()
             os.fsync(f.fileno())

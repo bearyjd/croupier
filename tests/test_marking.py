@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Grepon Labs
 """Daily mark-to-market and the automatic 25% drawdown halt. No network."""
+import json
 from datetime import UTC, date, datetime
 
 import pytest
@@ -365,7 +366,36 @@ async def test_halt_is_persisted_before_the_audit_event_is_written(
     _fill(led, "a1", "buy", 1000, 2.80, D1)
     await mark_to_market(led, fake_router({"ACME": 2.80}), SleeveState.empty(),
                          max_drawdown_pct=25.0, as_of=D1)
-    with pytest.raises(RuntimeError):
-        await mark_to_market(led, fake_router({"ACME": 2.00}), SleeveState.empty(),
-                             max_drawdown_pct=25.0, as_of=D2, audit=_ExplodingAudit())
+    await mark_to_market(led, fake_router({"ACME": 2.00}), SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D2, audit=_ExplodingAudit())
     assert SleeveState.load(tmp_path / "data" / "sleeve_state.yaml").is_halted(SLEEVE)
+
+
+async def test_carrying_at_cost_is_audited_and_health_is_not_fresh(
+        led, fake_router, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    result = await mark_to_market(led, fake_router({"ACME": float("nan")}),
+                                  SleeveState.empty(), max_drawdown_pct=25.0,
+                                  as_of=D1, audit=audit)
+    assert result.marks[0].unpriced == ("ACME",)
+    assert result.data_health != DataHealth.FRESH
+    rec = [json.loads(x) for x in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    (ev,) = [r for r in rec if r.get("event") == "unpriced_carried_at_cost"]
+    assert ev["sleeve"] == SLEEVE and ev["tickers"] == ["ACME"]
+
+
+async def test_a_failing_audit_write_does_not_stop_later_sleeves(
+        led, fake_router, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for i, sleeve in enumerate(("alpha", "beta")):       # sorted: alpha first
+        led.record_fill(Fill(f"a{i}", sleeve, f"T{i}", "buy", 1000, 2.80,
+                             datetime(D1.year, D1.month, D1.day, 14, tzinfo=UTC)))
+    prices = {"T0": 2.80, "T1": 2.80}
+    await mark_to_market(led, fake_router(prices), SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D1)
+    result = await mark_to_market(led, fake_router({"T0": 1.0, "T1": 1.0}),
+                                  SleeveState.empty(), max_drawdown_pct=25.0,
+                                  as_of=D2, audit=_ExplodingAudit())
+    assert result.state.is_halted("alpha") and result.state.is_halted("beta")

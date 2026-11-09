@@ -271,13 +271,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         payload = json.load(sys.stdin, parse_constant=_reject_nonfinite)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         _emit({"error": f"invalid JSON on stdin: {exc}"})
         return 2
     handler = {"check": cmd_check, "decline": cmd_decline}.get(args.cmd, cmd_fill)
     try:
         return handler(payload)
-    except (ValueError, TypeError, OverflowError, sqlite3.IntegrityError) as exc:
+    except (ValueError, TypeError, OverflowError, RecursionError,
+            sqlite3.IntegrityError) as exc:
         _emit({"error": f"invalid input: {exc}"})
         return 2
 

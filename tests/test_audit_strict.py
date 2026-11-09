@@ -30,3 +30,14 @@ def test_allow_nan_false_is_a_backstop_if_cleaning_is_bypassed(tmp_path, monkeyp
     log = AuditLog(tmp_path / "audit.jsonl")
     with pytest.raises(ValueError):
         log.log_event("e", {"a": float("nan")})
+
+
+def test_a_record_too_deeply_nested_to_clean_is_still_logged(tmp_path):
+    deep: object = 1
+    for _ in range(5000):
+        deep = [deep]
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.log_fill("a1", "ACME", "buy", deep, 1.0, orphan=True)
+    (rec,) = _strict(tmp_path / "audit.jsonl")
+    assert rec["kind"] == "fill" and rec["approval_id"] == "a1"
+    assert "nested" in rec["qty"]

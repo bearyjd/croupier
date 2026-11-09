@@ -287,6 +287,38 @@ def test_every_audit_line_is_strict_json_after_hostile_inputs(
     assert len(_audit_lines(workspace)) >= 6
 
 
+@pytest.mark.parametrize("cmd", ["check", "fill"])
+def test_absurdly_nested_json_is_a_json_error_not_a_traceback(
+        workspace, monkeypatch, capsys, cmd):
+    deep = "[" * 1200 + "]" * 1200
+    base = {"check": _order(), "fill": {"approval_id": "x", "ticker": "ACME",
+                                        "side": "buy", "qty": 1, "price": 1}}[cmd]
+    raw = json.dumps({**base, "qty": "@@"}).replace('"@@"', deep)
+    code, out = _run_raw(monkeypatch, capsys, [cmd], raw)
+    assert code == 2 and "error" in out
+
+
+def test_recursion_error_while_parsing_or_handling_is_a_json_error(
+        workspace, monkeypatch, capsys):
+    def boom(*_a, **_k):
+        raise RecursionError("maximum recursion depth exceeded")
+    with monkeypatch.context() as m:
+        m.setattr("croupier.cli.json.load", boom)
+        code, out = _run_raw(m, capsys, ["check"], "{}")
+    assert code == 2 and "error" in out
+    monkeypatch.setattr("croupier.cli.cmd_check", boom)
+    code, out = _run_raw(monkeypatch, capsys, ["check"], "{}")
+    assert code == 2 and "error" in out
+
+
+def test_decline_with_an_absurdly_nested_id_is_still_audited(
+        workspace, monkeypatch, capsys):
+    deep = "[" * 1200 + "]" * 1200
+    raw = '{"approval_id": ' + deep + ', "reason": "r"}'
+    code, _ = _run_raw(monkeypatch, capsys, ["decline"], raw)
+    assert code != 0 and _audit_lines(workspace)[-1]["kind"] == "decline"
+
+
 def test_check_requires_signal_refs(workspace, monkeypatch, capsys):
     code, out = _run(monkeypatch, capsys, ["check"], _order(signal_refs=[]))
     assert code == 2 and "signal_refs" in out["error"]
