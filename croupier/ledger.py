@@ -18,7 +18,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from croupier.drawdown import EquityPoint
-from croupier.models import utcnow
+from croupier.models import require_ts, utcnow
 
 LEDGER_PATH = Path("data/ledger.db")
 
@@ -170,7 +170,7 @@ class Ledger:
             Fill(
                 approval_id=r["approval_id"], sleeve=r["sleeve"], ticker=r["ticker"],
                 side=r["side"], qty=r["qty"], price=r["price"],
-                filled_at=datetime.fromisoformat(r["filled_at"]),
+                filled_at=require_ts(r["filled_at"]),
             )
             for r in self._conn.execute(sql, args)
         ]

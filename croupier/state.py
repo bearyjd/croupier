@@ -17,7 +17,7 @@ from pathlib import Path
 import yaml
 
 from croupier.gates.pipeline import PolicyConfig
-from croupier.models import Mode, utcnow
+from croupier.models import Mode, parse_ts, utcnow
 
 STATE_PATH = Path("data/sleeve_state.yaml")
 
@@ -92,14 +92,9 @@ class SleeveState:
 
 
 def _parse_ts(value: object) -> datetime:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            pass
-    return utcnow()
+    # Naive values are read as UTC. Malformed/absent -> now: the halt itself
+    # never depends on this value, so it can never be skipped by a bad stamp.
+    return parse_ts(value) or utcnow()
 
 
 def merge_halts(cfg: PolicyConfig, state: SleeveState) -> PolicyConfig:

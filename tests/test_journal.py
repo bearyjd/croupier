@@ -302,3 +302,19 @@ def test_old_records_sharing_a_timestamp_get_distinct_handles(tmp_path, audit, l
     assert len({n.handle for n in issues}) == 2
     audit.log_ack_fill(None, "r", handle=issues[0].handle)
     assert len(_build(tmp_path, audit, ledger).needs_action) == 1
+
+
+def test_naive_and_malformed_audit_ts_do_not_crash_the_journal(tmp_path, audit, ledger):
+    rec = _check_record("a1")
+    audit._append({**rec, "ts": "2026-11-09T10:00:00"})                 # naive
+    audit._append({"ts": "garbage", "kind": "fill", "approval_id": "a9",
+                   "ticker": "ACME", "side": "buy", "qty": 1, "price": 1,
+                   "orphan": True})
+    audit._append({"ts": None, "kind": "reconcile", "force": True, "fill_id": "f"})
+    from datetime import UTC, datetime
+    naive_now = datetime.now(UTC).replace(tzinfo=None).isoformat()
+    audit._append({"ts": naive_now, "kind": "reconcile", "force": True,
+                   "fill_id": "ok", "ticker": "ACME", "side": "buy", "qty": 1,
+                   "price": 1, "reason": "r"})
+    report = _build(tmp_path, audit, ledger)                           # must not raise
+    assert [f.fill_id for f in report.forced] == ["ok"]

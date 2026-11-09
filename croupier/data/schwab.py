@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 
 from croupier.data.base import DataHealth, Quote
+from croupier.models import require_ts
 
 log = logging.getLogger(__name__)
 
@@ -40,11 +41,11 @@ class TokenState:
             return cls(
                 access_token=raw["access_token"],
                 refresh_token=raw["refresh_token"],
-                access_expires_at=datetime.fromisoformat(raw["access_expires_at"]),
-                refresh_issued_at=datetime.fromisoformat(raw["refresh_issued_at"]),
+                access_expires_at=require_ts(raw["access_expires_at"]),
+                refresh_issued_at=require_ts(raw["refresh_issued_at"]),
             )
         except (FileNotFoundError, KeyError, ValueError):
-            return None
+            return None   # unreadable -> no tokens -> health DEAD (fail closed)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

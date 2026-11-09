@@ -84,3 +84,44 @@ def test_with_halt_is_immutable_and_keeps_existing_halts():
 
 def test_missing_state_file_is_an_empty_state(tmp_path):
     assert SleeveState.load(tmp_path / "nope.yaml").halts == {}
+
+
+# --- naive / malformed timestamps in the state file ------------------------------
+
+import pytest  # noqa: E402
+
+from croupier.models import parse_ts  # noqa: E402
+
+
+@pytest.mark.parametrize("since", [
+    "2026-08-28T10:00:00",            # naive string
+    "2026-08-28T10:00:00+02:00",      # aware string
+    "garbage", 12345, None, "",       # malformed
+])
+def test_halt_with_any_since_still_halts_and_since_is_aware(tmp_path, since):
+    import yaml
+    p = tmp_path / "state.yaml"
+    p.write_text(yaml.safe_dump({"sleeves": {"event_driven": {
+        "mode": "halted", "reason": "dd", "since": since}}}))
+    state = SleeveState.load(p)
+    assert state.is_halted("event_driven")
+    since_dt = state.halts["event_driven"].since
+    assert since_dt.tzinfo is not None
+    assert since_dt <= datetime.now(UTC)          # comparable with aware values
+
+
+def test_yaml_native_naive_timestamp_still_halts(tmp_path):
+    p = tmp_path / "state.yaml"
+    p.write_text("sleeves:\n  event_driven:\n    mode: halted\n"
+                 "    since: 2026-08-28T10:00:00\n")
+    state = SleeveState.load(p)
+    assert state.is_halted("event_driven")
+    assert state.halts["event_driven"].since == datetime(2026, 8, 28, 10, tzinfo=UTC)
+
+
+def test_parse_ts_naive_is_utc_and_malformed_is_none():
+    assert parse_ts("2026-08-28T10:00:00") == datetime(2026, 8, 28, 10, tzinfo=UTC)
+    assert parse_ts(datetime(2026, 8, 28, 10)) == datetime(2026, 8, 28, 10, tzinfo=UTC)
+    assert parse_ts("2026-08-28T12:00:00+02:00") == datetime(2026, 8, 28, 10, tzinfo=UTC)
+    for bad in ("garbage", None, 5, ""):
+        assert parse_ts(bad) is None
