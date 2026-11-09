@@ -12,12 +12,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from croupier.audit import AuditLog
+from croupier.audit import AuditLog, valid_approval_id
 from croupier.data import observed_health
 from croupier.data.base import DataHealth
 from croupier.data.factory import build_router
@@ -31,6 +32,13 @@ from croupier.models import AccountSnapshot, OrderIntent, require_finite
 from croupier.policy import load as load_full_policy
 
 AUDIT_PATH = Path("data/audit.jsonl")
+
+# A fill reporting more than this multiple of the approved quantity is not an
+# overfill the operator can reconcile, it is corrupt data (a unit slip, a
+# hostile or garbled report). Up to the factor, the real quantity is recorded
+# and flagged; beyond it, or with a non-finite notional, the fill is refused
+# and flagged, because a recorded 1e308 would poison cost basis and marking.
+MAX_OVERFILL_FACTOR = 10
 
 
 def _emit(obj: object) -> None:
@@ -98,6 +106,14 @@ def cmd_fill(payload: dict) -> int:
     approval_id = payload["approval_id"]
     ticker, side = payload["ticker"], payload["side"]
     qty, price = payload["qty"], payload["price"]
+    if valid_approval_id(approval_id) is None:
+        # Nothing can join to this id, and it must not be matched or hashed as
+        # one. It still goes on the record, as text, with a handle to ack it by.
+        log.log_fill(repr(approval_id), ticker, side, qty, price, orphan=True,
+                     flags=("bad_approval_id",))
+        _emit({"logged": True, "ledger": False, "error": (
+            "approval_id must be a non-blank string; recorded as ORPHAN")})
+        return 2
     try:
         if not isinstance(ticker, str) or not isinstance(side, str):
             raise ValueError("ticker and side must be text")
@@ -129,6 +145,18 @@ def cmd_fill(payload: dict) -> int:
         return 1
 
     sleeve = intent["sleeve"]
+    approved_qty = intent.get("qty")
+    if not math.isfinite(qty * price) or (
+            isinstance(approved_qty, (int, float))
+            and qty > MAX_OVERFILL_FACTOR * approved_qty):
+        log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve,
+                     flags=("refused", "implausible"))
+        _emit({"logged": True, "ledger": False, "error": (
+            f"implausible fill: {qty:g} @ {price:g} against approved qty "
+            f"{approved_qty}; more than {MAX_OVERFILL_FACTOR}x the approval or a "
+            "non-finite notional is treated as corrupt data and NOT recorded in "
+            "the ledger. Stop and report to the operator")})
+        return 1
     fill = new_fill(approval_id, sleeve, ticker, side, qty, price)
     with Ledger(LEDGER_PATH) as ledger:
         try:
@@ -145,7 +173,8 @@ def cmd_fill(payload: dict) -> int:
     if inserted:   # an identical replay is a harmless repeat: no second record
         log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve, flags=flags)
     _emit({"logged": True, "ledger": True, "sleeve": sleeve,
-           "new": inserted, "warnings": warnings})
+           "new": inserted, "replay": not inserted,
+           "warnings": warnings})
     return 1 if warnings else 0
 
 
@@ -176,6 +205,8 @@ def cmd_decline(payload: dict) -> int:
     """
     log = AuditLog(AUDIT_PATH)
     approval_id = payload["approval_id"]
+    if not isinstance(approval_id, str):
+        approval_id = repr(approval_id)   # recorded as an unknown id, never hashed raw
     reason = str(payload.get("reason", "")).strip()
     if not reason:
         _emit({"logged": False, "error": "a decline needs a reason — it is part of the trail"})
@@ -207,21 +238,33 @@ def cmd_decline(payload: dict) -> int:
     return 0
 
 
-def cmd_ack_fill(approval_id: str, reason: str) -> int:
+def cmd_ack_fill(approval_id: str | None, handle: str | None, reason: str) -> int:
     """Acknowledge a flagged, refused or orphan fill so the journal stops
-    listing it. The fill's own record stays in the trail unchanged."""
+    listing it. This only silences the journal: it corrects nothing in the
+    ledger, and the fill's own record stays in the trail unchanged."""
     from croupier.journal import needs_action
     reason = reason.strip()
     if not reason:
         _emit({"logged": False, "error": "an acknowledgement needs a reason"})
         return 1
-    log = AuditLog(AUDIT_PATH)
-    if not any(n.approval_id == approval_id for n in needs_action(log)):
-        _emit({"logged": False, "error": (
-            f"no unresolved flagged fill for approval_id {approval_id!r}")})
+    if (approval_id is None) == (handle is None):
+        _emit({"logged": False, "error": "give exactly one of approval_id or --handle"})
         return 1
-    log.log_ack_fill(approval_id, reason)
-    _emit({"logged": True, "approval_id": approval_id, "reason": reason})
+    log = AuditLog(AUDIT_PATH)
+    issues = needs_action(log)
+    if handle is not None:
+        hit = [i for i in issues if i.handle == handle]
+    else:
+        approval_id = valid_approval_id(approval_id)
+        hit = [i for i in issues if approval_id and i.match_id == approval_id]
+    if not hit:
+        _emit({"logged": False, "error": (
+            f"no unresolved flagged fill for {handle or approval_id!r}")})
+        return 1
+    log.log_ack_fill(hit[0].match_id if handle is not None else approval_id,
+                     reason, handle=handle)
+    _emit({"logged": True, "reason": reason, "handle": handle,
+           "approval_id": approval_id})
     return 0
 
 
@@ -303,7 +346,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="retire an approved order that will not be placed (JSON on stdin)")
     ack = sub.add_parser("ack-fill",
                          help="acknowledge a flagged/orphan fill after reconciling it")
-    ack.add_argument("approval_id")
+    ack.add_argument("approval_id", nargs="?", default=None)
+    ack.add_argument("--handle", default=None,
+                     help="the fill_id shown in the journal, for a record with no usable id")
     ack.add_argument("--reason", default="")
     sub.add_parser("mark", help="daily mark-to-market + drawdown halt")
     sub.add_parser("journal", help="render today's operator journal")
@@ -311,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     if args.cmd == "ack-fill":
-        return cmd_ack_fill(args.approval_id, args.reason)
+        return cmd_ack_fill(args.approval_id, args.handle, args.reason)
     if args.cmd == "mark":
         return cmd_mark()
     if args.cmd == "journal":

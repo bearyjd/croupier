@@ -265,3 +265,20 @@ def test_corrupt_audit_line_does_not_break_the_journal(tmp_path, audit, ledger):
         f.write("{not json\n")
     report = _build(tmp_path, audit, ledger)
     assert len(report.pending) == 1
+
+
+@pytest.mark.parametrize("bad", [["x"], {"k": "v"}, 123, None])
+@pytest.mark.parametrize("kind", ["fill", "decline", "ack_fill", "check"])
+def test_malformed_ids_in_the_audit_log_do_not_blind_the_journal(
+        tmp_path, audit, ledger, bad, kind):
+    audit._append(_check_record("a1"))
+    rec = {"ts": "2026-08-28T11:00:00+00:00", "kind": kind, "approval_id": bad,
+           "ticker": "ACME", "side": "buy", "qty": 1, "reason": "r"}
+    if kind == "check":
+        rec.update(approved=True, requires_confirm=True, intent={})
+    audit._append(rec)
+    report = _build(tmp_path, audit, ledger)          # must not raise
+    assert "a1" in [p.approval_id for p in report.pending]
+    if kind != "ack_fill":
+        assert any("malformed" in " ".join(n.problems) for n in report.needs_action)
+    assert render(report)

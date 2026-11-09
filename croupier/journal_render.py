@@ -59,7 +59,8 @@ def render(report: JournalReport) -> str:
     out += [f"## Needs action ({len(report.needs_action)})", ""]
     if report.needs_action:
         out += ["Fills that need reconciling. Stop trading on these tickers until "
-                "resolved; then `croupier ack-fill <approval_id> --reason \"...\"`.", ""]
+                "resolved. Acknowledging only silences this list; it does not correct "
+                "the ledger.", ""]
         out += [_issue_block(i) for i in report.needs_action]
     else:
         out += ["_none_"]
@@ -113,6 +114,9 @@ def _issue_block(i: FillIssue) -> str:
     return "\n".join([
         f"- `{i.approval_id}` {i.side} {i.qty} {i.ticker} — reported {i.ts}",
         *[f"    - {p}" for p in i.problems],
+        "    - acknowledge: " + (f"`croupier ack-fill {i.match_id} --reason ...`"
+                                 if i.match_id else
+                                 f"`croupier ack-fill --handle {i.handle} --reason ...`"),
     ])
 
 

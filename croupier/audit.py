@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import uuid
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -35,6 +36,15 @@ def _clean(value: object) -> object:
     if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= _MAX_LOGGED_INT:
         return str(value)
     return value
+
+
+def valid_approval_id(value: object) -> str | None:
+    """The one normalisation for approval ids: a non-blank string, else None.
+
+    Anything else (null, a number, a list) can never name an approval, so it
+    must never be matched, hashed or compared as one.
+    """
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _safe_clean(record: dict) -> dict:
@@ -86,19 +96,25 @@ class AuditLog:
         logged — an ungated trade is precisely what the audit trail is for.
 
         ``flags`` marks a fill that reached (or was refused by) the ledger but
-        needs an operator: ``overfill``, ``fill_after_decline``, ``refused``.
-        Each becomes a ``<flag>: true`` field.
+        needs an operator: ``overfill``, ``fill_after_decline``, ``refused``,
+        ``implausible``, ``bad_approval_id``. Each becomes a ``<flag>: true``
+        field. Every fill record also gets a unique ``fill_id``: the handle
+        that acknowledges it when its approval_id cannot (null, non-string).
         """
         self._append({"ts": utcnow().isoformat(), "kind": "fill",
+                      "fill_id": uuid.uuid4().hex[:12],
                       "approval_id": approval_id, "sleeve": sleeve,
                       "ticker": ticker, "side": side, "qty": qty,
                       "price": price, "orphan": orphan,
                       **{flag: True for flag in flags}})
 
-    def log_ack_fill(self, approval_id: str, reason: str) -> None:
-        """Record the operator's acknowledgement of a flagged/orphan fill."""
+    def log_ack_fill(self, approval_id: str | None, reason: str,
+                     handle: str | None = None) -> None:
+        """Record the operator's acknowledgement of a flagged/orphan fill,
+        by approval_id or, for a record with no usable id, by its handle."""
         self._append({"ts": utcnow().isoformat(), "kind": "ack_fill",
-                      "approval_id": approval_id, "reason": reason})
+                      "approval_id": approval_id, "handle": handle,
+                      "reason": reason})
 
     def log_decline(self, approval_id: str, reason: str,
                     known: bool = True) -> None:
