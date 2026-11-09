@@ -30,8 +30,12 @@ def require_finite(**values: float) -> None:
     bool is an int subclass and strings reach here from JSON, so both are refused.
     """
     for name, value in values.items():
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(value)):
+        try:
+            ok = (not isinstance(value, bool) and isinstance(value, (int, float))
+                  and math.isfinite(value))
+        except OverflowError:          # an int too large for a float
+            ok = False
+        if not ok:
             raise ValueError(f"{name} must be a finite number, got {value!r}")
 
 

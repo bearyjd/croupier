@@ -3,6 +3,8 @@
 """TWR equity index: flows must not fake a drawdown (sleeve guardrails)."""
 from datetime import date
 
+import pytest
+
 from croupier.drawdown import advance
 
 D1, D2, D3 = date(2026, 8, 26), date(2026, 8, 27), date(2026, 8, 28)
@@ -52,3 +54,11 @@ def test_partial_sell_above_cost_reports_the_real_return():
 def test_flat_day_with_no_capital_at_risk():
     p1 = _adv(None, D1, mv=0.0, flow=0.0)
     assert p1.twr_index == 1.0 and p1.drawdown_pct == 0.0
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan")])
+def test_advance_refuses_a_non_finite_market_value_or_flow(bad):
+    with pytest.raises(ValueError, match="finite"):
+        advance(None, sleeve="s", as_of=date(2026, 1, 1), market_value=bad, net_flow=0.0)
+    with pytest.raises(ValueError, match="finite"):
+        advance(None, sleeve="s", as_of=date(2026, 1, 1), market_value=1.0, net_flow=bad)

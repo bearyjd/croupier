@@ -12,6 +12,7 @@ over policy.yaml. Clearing it is a human act: the code never un-halts.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date
 
@@ -20,7 +21,7 @@ from croupier.data import observed_health
 from croupier.data.base import DataHealth, Quote
 from croupier.data.router import DataRouter
 from croupier.drawdown import EquityPoint, advance
-from croupier.ledger import Ledger
+from croupier.ledger import Ledger, Position
 from croupier.models import utcnow
 from croupier.state import Halt, SleeveState
 
@@ -77,46 +78,72 @@ async def mark_to_market(
     next_state = state
     for sleeve in sorted({p.sleeve for p in positions} | set(ledger.sleeves())):
         held = [p for p in positions if p.sleeve == sleeve]
-        market_value = sum(
-            p.qty * quotes[p.ticker].price for p in held if quotes.get(p.ticker)
-        )
-        unpriced = tuple(sorted(p.ticker for p in held if not quotes.get(p.ticker)))
+        values = {p.ticker: _priced_value(p, quotes.get(p.ticker)) for p in held}
+        market_value = sum(v for v in values.values() if v is not None)
+        unpriced = tuple(sorted(t for t, v in values.items() if v is None))
         # An unpriced holding is carried at cost rather than dropped to zero,
         # which would fake a drawdown and halt the sleeve on a data outage.
+        # A quote that is non-finite or overflows the value counts as unpriced.
         market_value += sum(p.cost_basis for p in held if p.ticker in unpriced)
+        net_flow = ledger.net_flow_on(sleeve, day)
 
-        point = advance(
-            # Strictly before today, so re-marking within a day recomputes
-            # today's point instead of stacking on it — see
-            # Ledger.last_equity_point_before.
-            ledger.last_equity_point_before(sleeve, day),
-            sleeve=sleeve,
-            as_of=day,
-            market_value=market_value,
-            net_flow=ledger.net_flow_on(sleeve, day),
-        )
-        ledger.record_equity_point(point)
-
+        pending_event: tuple[str, dict] | None = None
         halted_now = False
-        if point.breaches(max_drawdown_pct) and not next_state.is_halted(sleeve):
-            halt = Halt(
+        if not (math.isfinite(market_value) and math.isfinite(net_flow)):
+            # A book that cannot be valued (legacy inf/NaN row) is not
+            # evidence of safety: halt the sleeve, and keep the poison out
+            # of the equity curve.
+            point = _prev_or_flat(ledger.last_equity_point_before(sleeve, day), sleeve, day)
+            if not next_state.is_halted(sleeve):
+                halt = Halt(
+                    sleeve=sleeve, since=utcnow(), drawdown_pct=0.0,
+                    reason=("non-finite market value or cash flow in the ledger; "
+                            "fix the offending fill, then human review required"),
+                )
+                next_state = next_state.with_halt(halt)
+                halted_now = True
+                # Safety state first, logging second.
+                next_state.save()
+                pending_event = ("sleeve_halted", {
+                    "sleeve": sleeve, "reason": halt.reason,
+                    "market_value": market_value, "net_flow": net_flow})
+            market_value = point.market_value
+            net_flow = 0.0
+        else:
+            point = advance(
+                # Strictly before today, so re-marking within a day recomputes
+                # today's point instead of stacking on it — see
+                # Ledger.last_equity_point_before.
+                ledger.last_equity_point_before(sleeve, day),
                 sleeve=sleeve,
-                reason=(
-                    f"drawdown {point.drawdown_pct:.1f}% exceeds "
-                    f"{max_drawdown_pct:.0f}% from high-water mark "
-                    "(sleeve guardrails); human strategy review required"
-                ),
-                since=utcnow(),
-                drawdown_pct=round(point.drawdown_pct, 2),
+                as_of=day,
+                market_value=market_value,
+                net_flow=net_flow,
             )
-            next_state = next_state.with_halt(halt)
-            halted_now = True
-            if audit is not None:
-                audit.log_event("sleeve_halted", {
+            ledger.record_equity_point(point)
+            if point.breaches(max_drawdown_pct) and not next_state.is_halted(sleeve):
+                halt = Halt(
+                    sleeve=sleeve,
+                    reason=(
+                        f"drawdown {point.drawdown_pct:.1f}% exceeds "
+                        f"{max_drawdown_pct:.0f}% from high-water mark "
+                        "(sleeve guardrails); human strategy review required"
+                    ),
+                    since=utcnow(),
+                    drawdown_pct=round(point.drawdown_pct, 2),
+                )
+                next_state = next_state.with_halt(halt)
+                halted_now = True
+                # Safety state first, logging second: a failing audit write
+                # must never leave a breached sleeve un-halted.
+                next_state.save()
+                pending_event = ("sleeve_halted", {
                     "sleeve": sleeve, "reason": halt.reason,
                     "drawdown_pct": halt.drawdown_pct,
                     "twr_index": point.twr_index, "hwm_index": point.hwm_index,
                 })
+        if pending_event is not None and audit is not None:
+            audit.log_event(*pending_event)
 
         marks.append(SleeveMark(
             sleeve=sleeve,
@@ -127,9 +154,6 @@ async def mark_to_market(
             halted_now=halted_now,
             unpriced=unpriced,
         ))
-
-    if next_state is not state:
-        next_state.save()
 
     health = router.health()
     if probe:
@@ -144,6 +168,24 @@ async def mark_to_market(
         as_of=day, data_health=health,
         marks=tuple(marks), state=next_state,
     )
+
+
+def _priced_value(position: Position, quote: Quote | None) -> float | None:
+    """qty x quoted price, or None when there is no usable quote."""
+    if not quote:
+        return None
+    try:
+        value = position.qty * quote.price
+    except (TypeError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _prev_or_flat(prev: EquityPoint | None, sleeve: str, day: date) -> EquityPoint:
+    """The last good point, or a flat one; never recorded."""
+    return prev or EquityPoint(sleeve=sleeve, as_of=day, market_value=0.0,
+                               net_flow=0.0, twr_index=1.0, hwm_index=1.0,
+                               drawdown_pct=0.0)
 
 
 async def _quote_all(router: DataRouter, tickers: set[str]) -> dict[str, Quote | None]:

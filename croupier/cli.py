@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -98,7 +99,11 @@ def cmd_fill(payload: dict) -> int:
     ticker, side = payload["ticker"], payload["side"]
     qty, price = payload["qty"], payload["price"]
     try:
+        if not isinstance(ticker, str) or not isinstance(side, str):
+            raise ValueError("ticker and side must be text")
         require_finite(qty=qty, price=price)
+        if qty <= 0 or price <= 0:
+            raise ValueError("qty and price must be positive")
     except ValueError as exc:
         # Not a fill any approval could cover; never reaches the ledger, but
         # still goes on the record.
@@ -272,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     handler = {"check": cmd_check, "decline": cmd_decline}.get(args.cmd, cmd_fill)
     try:
         return handler(payload)
-    except (ValueError, TypeError, OverflowError) as exc:
+    except (ValueError, TypeError, OverflowError, sqlite3.IntegrityError) as exc:
         _emit({"error": f"invalid input: {exc}"})
         return 2
 

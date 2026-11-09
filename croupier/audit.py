@@ -17,11 +17,23 @@ from croupier.data.base import DataHealth
 from croupier.gates.pipeline import PolicyConfig, check
 from croupier.models import AccountSnapshot, OrderIntent, Verdict, utcnow
 
+_MAX_LOGGED_INT = 2**63
 
-def _loggable(value: object) -> object:
-    """A non-finite float cannot be written as strict JSON; keep it as text."""
+
+def _clean(value: object) -> object:
+    """Make a record strict-JSON safe, recursively.
+
+    Non-finite floats and absurdly large ints become text: a hostile value
+    must be recorded, never raise and suppress the record.
+    """
+    if isinstance(value, dict):
+        return {k: _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
     if isinstance(value, float) and not math.isfinite(value):
         return repr(value)
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= _MAX_LOGGED_INT:
+        return str(value)
     return value
 
 
@@ -59,8 +71,8 @@ class AuditLog:
         logged — an ungated trade is precisely what the audit trail is for."""
         self._append({"ts": utcnow().isoformat(), "kind": "fill",
                       "approval_id": approval_id, "sleeve": sleeve,
-                      "ticker": ticker, "side": side, "qty": _loggable(qty),
-                      "price": _loggable(price), "orphan": orphan})
+                      "ticker": ticker, "side": side, "qty": qty,
+                      "price": price, "orphan": orphan})
 
     def log_decline(self, approval_id: str, reason: str,
                     known: bool = True) -> None:
@@ -125,6 +137,6 @@ class AuditLog:
 
     def _append(self, record: dict) -> None:
         with open(self.path, "a") as f:
-            f.write(json.dumps(record, default=str, allow_nan=False) + "\n")
+            f.write(json.dumps(_clean(record), default=str, allow_nan=False) + "\n")
             f.flush()
             os.fsync(f.fileno())

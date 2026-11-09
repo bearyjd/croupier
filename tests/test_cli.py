@@ -207,6 +207,86 @@ def test_fill_with_null_approval_id_cannot_join_a_rejected_check(
         Ledger(workspace / "data" / "ledger.db").positions())
 
 
+def _audit_lines(workspace):
+    path = workspace / "data" / "audit.jsonl"
+    assert path.exists() and path.read_text().strip(), "audit log must not be empty"
+
+    def boom(c):
+        raise AssertionError(f"bare {c} in audit log")
+    return [json.loads(x, parse_constant=boom) for x in path.read_text().splitlines()]
+
+
+@pytest.mark.parametrize("field", ["approval_id", "ticker", "side"])
+def test_fill_with_a_non_finite_identifier_is_still_audited(
+        workspace, monkeypatch, capsys, field):
+    payload = {"approval_id": "x", "ticker": "ACME", "side": "buy", "qty": 1, "price": 1.0}
+    raw = json.dumps({**payload, field: "@@"}).replace('"@@"', "1e400")
+    code, out = _run_raw(monkeypatch, capsys, ["fill"], raw)
+    assert code != 0 and out["ledger"] is False
+    assert _audit_lines(workspace)[-1]["kind"] == "fill"
+
+
+def test_decline_with_a_non_finite_id_is_still_audited(workspace, monkeypatch, capsys):
+    code, _ = _run_raw(monkeypatch, capsys, ["decline"],
+                       '{"approval_id": 1e400, "reason": "r"}')
+    assert code != 0
+    assert _audit_lines(workspace)[-1]["kind"] == "decline"
+
+
+@pytest.mark.parametrize("field", ["qty", "price"])
+@pytest.mark.parametrize("bad", ["0", "-0.0", "-3", "1" + "0" * 400])
+def test_fill_with_zero_negative_or_huge_numbers_is_orphaned_not_a_crash(
+        workspace, monkeypatch, capsys, field, bad):
+    approval_id = _approved_id(monkeypatch, capsys)
+    good = {"qty": "1000", "price": "2.79"}
+    good[field] = bad
+    raw = (f'{{"approval_id": "{approval_id}", "ticker": "ACME", "side": "buy", '
+           f'"qty": {good["qty"]}, "price": {good["price"]}}}')
+    code, out = _run_raw(monkeypatch, capsys, ["fill"], raw)
+    assert code == 2 and out["ledger"] is False
+    assert not (workspace / "data" / "ledger.db").exists()
+    last = _audit_lines(workspace)[-1]
+    assert last["kind"] == "fill" and last["orphan"] is True
+
+
+@pytest.mark.parametrize("field", ["ticker", "side"])
+def test_fill_with_a_non_text_ticker_or_side_after_a_real_approval_is_orphaned(
+        workspace, monkeypatch, capsys, field):
+    approval_id = _approved_id(monkeypatch, capsys)
+    payload = {"approval_id": approval_id, "ticker": "ACME", "side": "buy",
+               "qty": 1, "price": 1.0, field: 1.5}
+    code, out = _run(monkeypatch, capsys, ["fill"], payload)
+    assert code == 2 and out["ledger"] is False
+    assert _audit_lines(workspace)[-1]["orphan"] is True
+
+
+def test_a_ledger_integrity_error_is_a_json_error_not_a_traceback(
+        workspace, monkeypatch, capsys):
+    import sqlite3
+    approval_id = _approved_id(monkeypatch, capsys)
+
+    def boom(*_a, **_k):
+        raise sqlite3.IntegrityError("CHECK constraint failed")
+    monkeypatch.setattr(Ledger, "record_fill", boom)
+    code, out = _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": approval_id, "ticker": "ACME", "side": "buy",
+        "qty": 1000, "price": 2.79})
+    assert code == 2 and "error" in out
+
+
+def test_every_audit_line_is_strict_json_after_hostile_inputs(
+        workspace, monkeypatch, capsys):
+    approval_id = _approved_id(monkeypatch, capsys)
+    for qty, price in (("1e400", "1"), ('"nan"', "1"), ("1", "-1e400"), ("true", "1")):
+        _run_raw(monkeypatch, capsys, ["fill"],
+                 f'{{"approval_id": "{approval_id}", "ticker": "ACME", '
+                 f'"side": "buy", "qty": {qty}, "price": {price}}}')
+    _run_raw(monkeypatch, capsys, ["decline"], '{"approval_id": 1e400}')
+    _run_raw(monkeypatch, capsys, ["fill"],
+             '{"approval_id": 1e400, "ticker": 1e400, "side": 1e400, "qty": 1, "price": 1}')
+    assert len(_audit_lines(workspace)) >= 6
+
+
 def test_check_requires_signal_refs(workspace, monkeypatch, capsys):
     code, out = _run(monkeypatch, capsys, ["check"], _order(signal_refs=[]))
     assert code == 2 and "signal_refs" in out["error"]

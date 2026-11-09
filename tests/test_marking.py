@@ -317,3 +317,55 @@ async def test_the_next_day_still_builds_on_the_previous_day(
     (m,) = day2.marks
     assert m.point.drawdown_pct == pytest.approx(20.0, abs=0.01), (
         "a 20% fall the next day must read as a 20% drawdown")
+
+
+async def test_overflowing_quote_cannot_poison_the_high_water_mark(
+        led, fake_router, tmp_path, monkeypatch):
+    """Day 2 quotes 1e306 (value -> inf); day 3 is a real 28.6% drawdown. The
+    halt must still fire, be persisted, and be audited."""
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    D3 = date(2026, 8, 28)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    for price, day in ((2.80, D1), (1e306, D2)):
+        r = await mark_to_market(led, fake_router({"ACME": price}), SleeveState.empty(),
+                                 max_drawdown_pct=25.0, as_of=day, audit=audit)
+    # the overflowing quote is treated as unpriced (carried at cost), not as a halt
+    assert r.marks[0].unpriced == ("ACME",) and not r.state.is_halted(SLEEVE)
+    result = await mark_to_market(led, fake_router({"ACME": 2.00}), SleeveState.empty(),
+                                  max_drawdown_pct=25.0, as_of=D3, audit=audit)
+    assert result.state.is_halted(SLEEVE)
+    assert SleeveState.load(tmp_path / "data" / "sleeve_state.yaml").is_halted(SLEEVE)
+    assert "sleeve_halted" in (tmp_path / "audit.jsonl").read_text()
+
+
+async def test_a_non_finite_book_halts_the_sleeve_instead_of_raising(
+        led, fake_router, tmp_path, monkeypatch):
+    """A pre-fix ledger row with inf in it must not make every later mark raise."""
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    led._conn.execute("UPDATE fills SET qty = 1e999")      # legacy inf row
+    led._conn.commit()
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    result = await mark_to_market(led, fake_router({"ACME": 2.80}), SleeveState.empty(),
+                                  max_drawdown_pct=25.0, as_of=D2, audit=audit)
+    assert result.state.is_halted(SLEEVE)
+    assert SleeveState.load(tmp_path / "data" / "sleeve_state.yaml").is_halted(SLEEVE)
+    assert "non-finite" in (tmp_path / "audit.jsonl").read_text()
+
+
+class _ExplodingAudit:
+    def log_event(self, *_a, **_k):
+        raise RuntimeError("audit disk full")
+
+
+async def test_halt_is_persisted_before_the_audit_event_is_written(
+        led, fake_router, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    await mark_to_market(led, fake_router({"ACME": 2.80}), SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D1)
+    with pytest.raises(RuntimeError):
+        await mark_to_market(led, fake_router({"ACME": 2.00}), SleeveState.empty(),
+                             max_drawdown_pct=25.0, as_of=D2, audit=_ExplodingAudit())
+    assert SleeveState.load(tmp_path / "data" / "sleeve_state.yaml").is_halted(SLEEVE)
