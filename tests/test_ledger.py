@@ -117,3 +117,11 @@ def test_an_oversell_is_a_ledger_conflict_so_cmd_fill_already_refuses_it(tmp_pat
     with _ledger(tmp_path) as led:
         with pytest.raises(LedgerConflict):
             led.record_fill(_fill("a1", "sell", 1.0, 5.00))
+
+
+def test_naive_stored_filled_at_is_read_as_aware_utc(tmp_path):
+    with _ledger(tmp_path) as led:
+        led.record_fill(_fill())
+        led._conn.execute("UPDATE fills SET filled_at = '2026-08-26T14:00:00'")
+        (f,) = led.fills()
+        assert f.filled_at == datetime(2026, 8, 26, 14, tzinfo=UTC)

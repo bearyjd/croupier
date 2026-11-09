@@ -187,3 +187,46 @@ async def test_failed_refresh_degrades_instead_of_raising(tmp_path, mock_http):
     mock_http(lambda r: httpx.Response(400, json={"error": "invalid_grant"}))
     _tokens(tmp_path, access_valid=False)
     assert await _adapter(tmp_path).quote("ACME") is None
+
+
+# --- naive / malformed token timestamps fail closed, never raise -------------
+
+def _write_tok(tmp_path, **over):
+    import json
+    now = datetime.now(UTC)
+    raw = {"access_token": "a", "refresh_token": "r",
+           "access_expires_at": (now + timedelta(minutes=30)).isoformat(),
+           "refresh_issued_at": (now - timedelta(days=1)).isoformat(), **over}
+    (tmp_path / "tok.json").write_text(json.dumps(raw))
+
+
+def test_naive_token_timestamps_are_read_as_utc_and_health_does_not_raise(tmp_path):
+    now = datetime.now(UTC).replace(tzinfo=None)
+    _write_tok(tmp_path, refresh_issued_at=(now - timedelta(days=1)).isoformat(),
+               access_expires_at=(now + timedelta(minutes=30)).isoformat())
+    t = TokenState.load(tmp_path / "tok.json")
+    assert t is not None and t.refresh_issued_at.tzinfo is not None
+    assert _adapter(tmp_path).health() == DataHealth.FRESH
+    assert t.days_until_reauth(datetime.now(UTC)) > 5
+
+
+def test_naive_expired_refresh_token_is_dead(tmp_path):
+    old = (datetime.now(UTC) - timedelta(days=30)).replace(tzinfo=None)
+    _write_tok(tmp_path, refresh_issued_at=old.isoformat())
+    assert _adapter(tmp_path).health() == DataHealth.DEAD
+
+
+@pytest.mark.parametrize("field", ["access_expires_at", "refresh_issued_at"])
+@pytest.mark.parametrize("bad", [None, 123, "garbage"])
+def test_malformed_token_timestamp_loads_as_none(tmp_path, field, bad):
+    _write_tok(tmp_path, **{field: bad})
+    assert TokenState.load(tmp_path / "tok.json") is None
+    assert _adapter(tmp_path).health() == DataHealth.DEAD
+
+
+async def test_naive_access_expiry_does_not_raise_in_quote_path(tmp_path, mock_http):
+    mock_http(lambda r: httpx.Response(200, json=_quote_body()))
+    soon = (datetime.now(UTC) + timedelta(minutes=30)).replace(tzinfo=None)
+    _write_tok(tmp_path, access_expires_at=soon.isoformat())
+    q = await _adapter(tmp_path).quote("ACME")
+    assert q is not None and q.price == pytest.approx(3.21)

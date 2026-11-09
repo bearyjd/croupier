@@ -123,3 +123,30 @@ def approval_id_for(intent: OrderIntent, ts: datetime) -> str:
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def parse_ts(value: object) -> datetime | None:
+    """Parse a persisted timestamp into an AWARE datetime, or None if malformed.
+
+    Convention: a naive value (hand-edited file, legacy record, YAML-native
+    timestamp) is read as UTC. Callers compare only the aware result, so a
+    naive/aware mix can never raise TypeError; callers in safety paths treat
+    None as "unknown" and fail closed.
+    """
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+def require_ts(value: object) -> datetime:
+    """parse_ts, but a malformed value raises ValueError (callers that already
+    treat ValueError as "unreadable" fail closed)."""
+    ts = parse_ts(value)
+    if ts is None:
+        raise ValueError(f"unparseable timestamp: {value!r}")
+    return ts

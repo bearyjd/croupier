@@ -21,6 +21,7 @@ from croupier.catalysts import CatalystEvent
 from croupier.data.base import DataHealth
 from croupier.gates.pipeline import SleeveConfig
 from croupier.ledger import Ledger, Position
+from croupier.models import parse_ts
 from croupier.policy import Policy
 from croupier.state import Halt
 
@@ -158,12 +159,9 @@ def forced_reconciles(audit: AuditLog, now: datetime) -> tuple[ForcedReconcile, 
     for rec in audit.records():
         if rec.get("kind") != "reconcile" or not rec.get("force"):
             continue
-        try:
-            ts = datetime.fromisoformat(rec["ts"])
-        except (KeyError, TypeError, ValueError):
+        ts = parse_ts(rec.get("ts"))   # naive -> UTC; malformed -> skipped
+        if ts is None:
             continue
-        if ts.tzinfo is None:   # hand-edited or legacy: read as UTC, still show it
-            ts = ts.replace(tzinfo=UTC)
         if now - ts <= FORCED_RECONCILE_WINDOW:
             out.append(ForcedReconcile(
                 str(rec.get("fill_id")), rec["ts"], str(rec.get("ticker")),
