@@ -149,8 +149,8 @@ below it; `PRICE_SLIP_TOLERANCE`) is recorded and flagged `price_above_limit` /
 `price_below_limit`: a limit order cannot fill on the wrong side of its limit,
 but a broker's reported average can drift a little. A fill whose quantity is
 over 10x the approved quantity (`MAX_OVERFILL_FACTOR`), whose price is more
-than 10x away from the limit in either direction (`MAX_PRICE_FACTOR`), whose
-notional is not finite, or that would make the sleeve cost basis non-finite, is
+than 10x on the adverse side of the limit (a buy above, a sell below;
+`MAX_PRICE_FACTOR`), whose notional is not finite, or that would make the sleeve cost basis non-finite, is
 treated as corrupt data: it is **not** recorded, is logged `refused` + `implausible`, and exits
 `1`. A non-string or blank `approval_id` is rejected up front (exit `2`) and
 logged as an orphan.
@@ -173,6 +173,29 @@ the first fill). The reason is required; it appends `{"kind": "ack_fill", …}` 
 (the original fill record stays as written). An acknowledgement also retires
 the approval from Pending confirms. Flagged and refused fills never clear a
 pending confirm on their own.
+
+A buy filled more than 10x *below* its limit (or a sell more than 10x *above*)
+can happen for real after a gap, so it is recorded at the real price and
+flagged `price_better_than_limit`, not refused.
+
+### `croupier reconcile` — operator-only: put a refused fill into the ledger
+
+A real fill the broker executed can still be refused (implausible, or an
+orphan), which leaves the ledger understating holdings. After confirming the
+true quantity and price with the broker, the operator records them against the
+fill's `fill_id` (shown in the journal's Needs action):
+
+```bash
+croupier reconcile 3f9a1c0b7d2e --qty 11000 --price 2.79 --reason "broker statement 2026-11-09"
+```
+
+It requires a non-blank `--reason`, a finite positive `--qty` and `--price`, a
+known `fill_id` whose record is refused or orphan, and one that is not already
+reconciled or acknowledged. It inserts the fill into the ledger (same position
+logic as `fill`, so an oversell is still refused), appends a
+`{"kind": "reconcile", "fill_id": …}` record to the audit log, and resolves the
+Needs action entry. Each fill reconciles at most once. An orphan record that
+names no sleeve cannot be placed. The agent never runs this command.
 
 ### `croupier decline` — retire an approved order that will not be placed
 

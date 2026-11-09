@@ -42,8 +42,10 @@ MAX_OVERFILL_FACTOR = 10
 # A limit order cannot legitimately fill on the wrong side of its limit; a real
 # broker can still report a little slippage in the average price, so a fill
 # beyond the limit by more than this fraction is recorded but flagged. Beyond
-# MAX_PRICE_FACTOR x the limit in either direction it is corrupt data, refused
-# like an implausible quantity.
+# MAX_PRICE_FACTOR x the limit on the ADVERSE side (a buy above, a sell below)
+# it is corrupt data, refused like an implausible quantity. On the favourable
+# side (a buy far below, a sell far above, e.g. after a gap) a limit order can
+# really fill, so it is recorded at the real price and flagged.
 PRICE_SLIP_TOLERANCE = 0.01
 MAX_PRICE_FACTOR = 10
 
@@ -207,9 +209,11 @@ def _implausible(intent: dict, qty: float, price: float, side: str,
         return (f"qty {qty:g} is more than {MAX_OVERFILL_FACTOR}x the approved "
                 f"qty {approved_qty:g}")
     limit = _limit(intent)
-    if limit and (price > _ceiling(MAX_PRICE_FACTOR * limit)
-                  or price < limit / MAX_PRICE_FACTOR / (1 + 1e-9)):
-        return (f"price {price:g} is more than {MAX_PRICE_FACTOR}x away from the "
+    if limit and side == "buy" and price > _ceiling(MAX_PRICE_FACTOR * limit):
+        return (f"buy price {price:g} is more than {MAX_PRICE_FACTOR}x above the "
+                f"approved limit {limit:g}")
+    if limit and side == "sell" and price < limit / MAX_PRICE_FACTOR / (1 + 1e-9):
+        return (f"sell price {price:g} is more than {MAX_PRICE_FACTOR}x below the "
                 f"approved limit {limit:g}")
     return None
 
@@ -264,6 +268,12 @@ def _fill_flags(log: AuditLog, approval_id: str, intent: dict,
         flags.append("price_below_limit")
         warnings.append(f"price below limit: sell filled at {price:g}, limit {limit:g} "
                         f"(more than {PRICE_SLIP_TOLERANCE:.0%} slip)")
+    if limit and ((fill.side == "buy" and price < limit / MAX_PRICE_FACTOR / (1 + 1e-9))
+                  or (fill.side == "sell" and price > _ceiling(MAX_PRICE_FACTOR * limit))):
+        flags.append("price_better_than_limit")
+        warnings.append(f"price better than limit: {fill.side} filled at {price:g}, "
+                        f"limit {limit:g} (over {MAX_PRICE_FACTOR}x in the operator's "
+                        "favour); recorded at the real price")
     return tuple(flags), warnings
 
 
@@ -339,6 +349,60 @@ def cmd_ack_fill(approval_id: str | None, handle: str | None, reason: str) -> in
                      reason, handle=handle)
     _emit({"logged": True, "reason": reason, "handle": handle,
            "approval_id": approval_id})
+    return 0
+
+
+def cmd_reconcile(handle: str, qty: float, price: float, reason: str) -> int:
+    """Operator-only: record the operator-confirmed values of a REFUSED or
+    ORPHAN fill (named by its fill_id) into the ledger, exactly once."""
+    from croupier.journal import needs_action
+    reason = reason.strip()
+    if not reason:
+        _emit({"logged": False, "error": "a reconcile needs a reason"})
+        return 1
+    if not (math.isfinite(qty) and math.isfinite(price) and qty > 0 and price > 0):
+        _emit({"logged": False, "error": "qty and price must be finite and positive"})
+        return 1
+    log = AuditLog(AUDIT_PATH)
+    rec = next((r for r in log.records()
+                if r.get("kind") == "fill" and r.get("fill_id") == handle), None)
+    if rec is None:
+        _emit({"logged": False, "error": f"unknown fill handle {handle!r}"})
+        return 1
+    if not (rec.get("refused") or rec.get("orphan")):
+        _emit({"logged": False, "error": (
+            "only a refused or orphan fill can be reconciled; this one is already "
+            "in the ledger (use ack-fill for a flagged fill)")})
+        return 1
+    if not any(i.handle == handle for i in needs_action(log)):
+        _emit({"logged": False, "error": (
+            f"fill {handle} was already acknowledged or reconciled")})
+        return 1
+    ticker, side = rec.get("ticker"), rec.get("side")
+    sleeve = rec.get("sleeve")
+    if not (isinstance(ticker, str) and side in ("buy", "sell")):
+        _emit({"logged": False, "error": "the fill record has no usable ticker/side"})
+        return 1
+    if not isinstance(sleeve, str) or not sleeve:
+        _emit({"logged": False, "error": (
+            "the fill record names no sleeve, so the ledger cannot place it; "
+            "resolve it with ack-fill and fix the position out of band")})
+        return 1
+    approval_id = valid_approval_id(rec.get("approval_id"))
+    with Ledger(LEDGER_PATH) as ledger:
+        # Key by the original approval_id when free (so a later re-report of the
+        # same approval cannot double count); else a key tied to this fill.
+        taken = {f.approval_id for f in ledger.fills()}
+        key = approval_id if approval_id and approval_id not in taken else f"reconcile:{handle}"
+        try:
+            ledger.record_fill(new_fill(key, sleeve, ticker, side, qty, price))
+        except LedgerConflict as exc:
+            _emit({"logged": False, "ledger": False, "error": str(exc)})
+            return 1
+    log.log_reconcile(handle, str(rec.get("approval_id")), sleeve, ticker.upper(),
+                      side, qty, price, reason)
+    _emit({"logged": True, "ledger": True, "fill_id": handle, "sleeve": sleeve,
+           "qty": qty, "price": price, "reason": reason})
     return 0
 
 
@@ -424,6 +488,12 @@ def main(argv: list[str] | None = None) -> int:
     ack.add_argument("--handle", default=None,
                      help="the fill_id shown in the journal, for a record with no usable id")
     ack.add_argument("--reason", default="")
+    rec = sub.add_parser("reconcile", help=(
+        "OPERATOR ONLY: record the confirmed values of a refused/orphan fill"))
+    rec.add_argument("handle", help="the fill_id shown in the journal")
+    rec.add_argument("--qty", type=float, required=True)
+    rec.add_argument("--price", type=float, required=True)
+    rec.add_argument("--reason", default="")
     sub.add_parser("mark", help="daily mark-to-market + drawdown halt")
     sub.add_parser("journal", help="render today's operator journal")
     sub.add_parser("auth-status", help="Schwab data-feed token health")
@@ -431,6 +501,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "ack-fill":
         return cmd_ack_fill(args.approval_id, args.handle, args.reason)
+    if args.cmd == "reconcile":
+        return cmd_reconcile(args.handle, args.qty, args.price, args.reason)
     if args.cmd == "mark":
         return cmd_mark()
     if args.cmd == "journal":
