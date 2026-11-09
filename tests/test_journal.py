@@ -282,3 +282,23 @@ def test_malformed_ids_in_the_audit_log_do_not_blind_the_journal(
     if kind != "ack_fill":
         assert any("malformed" in " ".join(n.problems) for n in report.needs_action)
     assert render(report)
+
+
+def test_acking_one_handle_leaves_other_open_issues_open(tmp_path, audit, ledger):
+    audit.log_fill("a1", "ACME", "buy", 10, 2.79, orphan=True)
+    audit.log_fill("a2", "ACME", "buy", 10, 2.79, orphan=True)
+    first, second = (n.handle for n in _build(tmp_path, audit, ledger).needs_action)
+    audit.log_ack_fill(None, "reconciled", handle=first)
+    left = _build(tmp_path, audit, ledger).needs_action
+    assert [n.handle for n in left] == [second]
+
+
+def test_old_records_sharing_a_timestamp_get_distinct_handles(tmp_path, audit, ledger):
+    for aid in ("a1", "a2"):     # pre-fill_id records: only a ts to go on
+        audit._append({"ts": "2026-08-28T11:00:00+00:00", "kind": "fill",
+                       "approval_id": aid, "ticker": "ACME", "side": "buy",
+                       "qty": 1, "price": 1.0, "orphan": True})
+    issues = _build(tmp_path, audit, ledger).needs_action
+    assert len({n.handle for n in issues}) == 2
+    audit.log_ack_fill(None, "r", handle=issues[0].handle)
+    assert len(_build(tmp_path, audit, ledger).needs_action) == 1

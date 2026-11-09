@@ -144,9 +144,14 @@ drawdown halt, and misstate the journal's sleeve lines. (Buy caps use the
 agent-supplied `sleeve_cost_basis` snapshot in `check`, not the ledger.)
 An identical replay of a recorded fill is a harmless repeat (`"new": false`,
 `"replay": true`, no second audit record, same exit code).
-A fill whose quantity is over 10x the approved quantity
-(`MAX_OVERFILL_FACTOR`), or whose notional is not finite, is treated as corrupt
-data: it is **not** recorded, is logged `refused` + `implausible`, and exits
+A buy filled more than 1% above its approved limit (or a sell more than 1%
+below it; `PRICE_SLIP_TOLERANCE`) is recorded and flagged `price_above_limit` /
+`price_below_limit`: a limit order cannot fill on the wrong side of its limit,
+but a broker's reported average can drift a little. A fill whose quantity is
+over 10x the approved quantity (`MAX_OVERFILL_FACTOR`), whose price is more
+than 10x away from the limit in either direction (`MAX_PRICE_FACTOR`), whose
+notional is not finite, or that would make the sleeve cost basis non-finite, is
+treated as corrupt data: it is **not** recorded, is logged `refused` + `implausible`, and exits
 `1`. A non-string or blank `approval_id` is rejected up front (exit `2`) and
 logged as an orphan.
 A conflicting second fill for one `approval_id` is refused and logged

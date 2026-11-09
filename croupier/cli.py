@@ -39,6 +39,13 @@ AUDIT_PATH = Path("data/audit.jsonl")
 # and flagged; beyond it, or with a non-finite notional, the fill is refused
 # and flagged, because a recorded 1e308 would poison cost basis and marking.
 MAX_OVERFILL_FACTOR = 10
+# A limit order cannot legitimately fill on the wrong side of its limit; a real
+# broker can still report a little slippage in the average price, so a fill
+# beyond the limit by more than this fraction is recorded but flagged. Beyond
+# MAX_PRICE_FACTOR x the limit in either direction it is corrupt data, refused
+# like an implausible quantity.
+PRICE_SLIP_TOLERANCE = 0.01
+MAX_PRICE_FACTOR = 10
 
 
 def _emit(obj: object) -> None:
@@ -145,31 +152,23 @@ def cmd_fill(payload: dict) -> int:
         return 1
 
     sleeve = intent["sleeve"]
-    approved_qty = intent.get("qty")
-    if not math.isfinite(qty * price) or (
-            isinstance(approved_qty, (int, float))
-            and qty > MAX_OVERFILL_FACTOR * approved_qty):
-        log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve,
-                     flags=("refused", "implausible"))
-        _emit({"logged": True, "ledger": False, "error": (
-            f"implausible fill: {qty:g} @ {price:g} against approved qty "
-            f"{approved_qty}; more than {MAX_OVERFILL_FACTOR}x the approval or a "
-            "non-finite notional is treated as corrupt data and NOT recorded in "
-            "the ledger. Stop and report to the operator")})
-        return 1
     fill = new_fill(approval_id, sleeve, ticker, side, qty, price)
+    replay, sleeve_cost = _ledger_view(fill)
+    if not replay:
+        reason = _implausible(intent, qty, price, side, sleeve_cost)
+        if reason:
+            error = (f"implausible fill: {reason}; treated as corrupt data and NOT "
+                     "recorded in the ledger. Stop and report to the operator")
+            return _refuse(log, fill, ("refused", "implausible"), error)
     with Ledger(LEDGER_PATH) as ledger:
         try:
             inserted = ledger.record_fill(fill)
         except LedgerConflict as exc:
-            log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve,
-                         flags=("refused",))
-            _emit({"logged": True, "ledger": False, "error": str(exc)})
-            return 1
+            return _refuse(log, fill, ("refused",), str(exc))
     # The ledger must hold what really happened, so a discrepant fill is
     # recorded at its real quantity and flagged, never refused: refusing would
-    # understate holdings (cost-basis caps, marking, the drawdown halt).
-    flags, warnings = _fill_flags(log, approval_id, intent, qty)
+    # understate holdings (sells, marking, the drawdown halt).
+    flags, warnings = _fill_flags(log, approval_id, intent, fill)
     if inserted:   # an identical replay is a harmless repeat: no second record
         log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve, flags=flags)
     _emit({"logged": True, "ledger": True, "sleeve": sleeve,
@@ -178,9 +177,75 @@ def cmd_fill(payload: dict) -> int:
     return 1 if warnings else 0
 
 
+def _ledger_view(fill) -> tuple[bool, float]:
+    """(is this an identical replay of a recorded fill, sleeve cost basis).
+    The sleeve total bounds every position in it. Does not create the ledger
+    file if there is none."""
+    if not LEDGER_PATH.exists():
+        return False, 0.0
+    with Ledger(LEDGER_PATH) as ledger:
+        for f in ledger.fills():
+            if (f.approval_id == fill.approval_id and f.sleeve == fill.sleeve
+                    and f.ticker == fill.ticker and f.side == fill.side
+                    and abs(f.qty - fill.qty) < 1e-9 and abs(f.price - fill.price) < 1e-9):
+                return True, 0.0
+        return False, sum(p.cost_basis for p in ledger.positions()
+                          if p.sleeve == fill.sleeve)
+
+
+def _implausible(intent: dict, qty: float, price: float, side: str,
+                 sleeve_cost: float) -> str | None:
+    """Why a fill cannot be a real execution of its approval, or None."""
+    if not math.isfinite(qty * price):
+        return f"notional {qty:g} x {price:g} is not finite (cost basis would be corrupt)"
+    notional = qty * price if side == "buy" else 0.0
+    if not math.isfinite(sleeve_cost + notional):
+        return "recording it would make the sleeve cost basis non-finite"
+    approved_qty = intent.get("qty")
+    if (isinstance(approved_qty, (int, float))
+            and qty > _ceiling(MAX_OVERFILL_FACTOR * approved_qty)):
+        return (f"qty {qty:g} is more than {MAX_OVERFILL_FACTOR}x the approved "
+                f"qty {approved_qty:g}")
+    limit = _limit(intent)
+    if limit and (price > _ceiling(MAX_PRICE_FACTOR * limit)
+                  or price < limit / MAX_PRICE_FACTOR / (1 + 1e-9)):
+        return (f"price {price:g} is more than {MAX_PRICE_FACTOR}x away from the "
+                f"approved limit {limit:g}")
+    return None
+
+
+def _ceiling(value: float) -> float:
+    """Absorb float rounding so an exact Nx boundary is not refused (10*623.78
+    is 6237.799999999999)."""
+    return value * (1 + 1e-9)
+
+
+def _limit(intent: dict) -> float | None:
+    limit = intent.get("limit_price")
+    ok = isinstance(limit, (int, float)) and not isinstance(limit, bool)
+    return float(limit) if ok and math.isfinite(limit) and limit > 0 else None
+
+
+def _refuse(log: AuditLog, fill, flags: tuple[str, ...], error: str) -> int:
+    """Refuse a fill. Reporting the identical refused fill again is a replay:
+    answer the same, but do not add a second Needs-action entry."""
+    seen = any(
+        r.get("kind") == "fill" and r.get("refused")
+        and r.get("approval_id") == fill.approval_id
+        and r.get("ticker", "").upper() == fill.ticker and r.get("side") == fill.side
+        and r.get("qty") == fill.qty and r.get("price") == fill.price
+        for r in log.records())
+    if not seen:
+        log.log_fill(fill.approval_id, fill.ticker, fill.side, fill.qty, fill.price,
+                     sleeve=fill.sleeve, flags=flags)
+    _emit({"logged": not seen, "replay": seen, "ledger": False, "error": error})
+    return 1
+
+
 def _fill_flags(log: AuditLog, approval_id: str, intent: dict,
-                qty: float) -> tuple[tuple[str, ...], list[str]]:
+                fill) -> tuple[tuple[str, ...], list[str]]:
     flags, warnings = [], []
+    qty, price = fill.qty, fill.price
     if any(r.get("kind") == "decline" and r.get("approval_id") == approval_id
            for r in log.records()):
         flags.append("fill_after_decline")
@@ -190,6 +255,15 @@ def _fill_flags(log: AuditLog, approval_id: str, intent: dict,
     if qty > approved_qty + 1e-9:
         flags.append("overfill")
         warnings.append(f"overfill: reported {qty:g} > approved {approved_qty:g}")
+    limit = _limit(intent)
+    if limit and fill.side == "buy" and price > limit * (1 + PRICE_SLIP_TOLERANCE) + 1e-9:
+        flags.append("price_above_limit")
+        warnings.append(f"price above limit: buy filled at {price:g}, limit {limit:g} "
+                        f"(more than {PRICE_SLIP_TOLERANCE:.0%} slip)")
+    if limit and fill.side == "sell" and price < limit * (1 - PRICE_SLIP_TOLERANCE) - 1e-9:
+        flags.append("price_below_limit")
+        warnings.append(f"price below limit: sell filled at {price:g}, limit {limit:g} "
+                        f"(more than {PRICE_SLIP_TOLERANCE:.0%} slip)")
     return tuple(flags), warnings
 
 

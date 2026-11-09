@@ -88,6 +88,8 @@ _PROBLEMS = (("orphan", "ORPHAN (no matching approval; not in the ledger)"),
              ("implausible", "implausible quantity (over 10x approved, or notional "
                              "not finite): treated as corrupt data"),
              ("fill_after_decline", "fill after decline (recorded in the ledger)"),
+             ("price_above_limit", "buy filled above its limit price (recorded)"),
+             ("price_below_limit", "sell filled below its limit price (recorded)"),
              ("overfill", "overfill (recorded in the ledger at the reported qty)"))
 _MALFORMED = "malformed record: approval_id is not a non-blank string"
 
@@ -123,7 +125,7 @@ def needs_action(audit: AuditLog) -> tuple[FillIssue, ...]:
             open_issues.append(FillIssue(
                 approval_id=str(rec.get("approval_id")),
                 match_id=None if rec.get("bad_approval_id") else match_id,
-                handle=str(rec.get("fill_id") or rec.get("ts") or f"rec{idx}"),
+                handle=str(rec.get("fill_id") or f"rec{idx}-{rec.get('ts', '')}"),
                 ts=rec.get("ts", ""), ticker=str(rec.get("ticker")),
                 side=str(rec.get("side")), qty=rec.get("qty"), problems=problems))
     return tuple(open_issues)
