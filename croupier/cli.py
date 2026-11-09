@@ -129,10 +129,17 @@ def cmd_fill(payload: dict) -> int:
         return 1
 
     sleeve = intent["sleeve"]
-    warnings = []
-    if qty > intent.get("qty", qty) + 1e-9:
-        warnings.append(
-            f"overfill: {qty} filled against approved qty {intent.get('qty')}")
+    discrepancy = None
+    if any(r.get("kind") == "decline" and r.get("approval_id") == approval_id
+           for r in log.records()):
+        discrepancy = f"approval {approval_id} was declined"
+    elif qty > intent.get("qty", qty) + 1e-9:
+        discrepancy = f"overfill: {qty:g} exceeds approved quantity {intent.get('qty'):g}"
+    if discrepancy:
+        log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve, orphan=True)
+        _emit({"logged": True, "ledger": False,
+               "error": f"{discrepancy}; recorded as ORPHAN and refused by the ledger"})
+        return 1
 
     fill = new_fill(approval_id, sleeve, ticker, side, qty, price)
     with Ledger(LEDGER_PATH) as ledger:
@@ -144,8 +151,8 @@ def cmd_fill(payload: dict) -> int:
             return 1
     log.log_fill(approval_id, ticker, side, qty, price, sleeve=sleeve)
     _emit({"logged": True, "ledger": True, "sleeve": sleeve,
-           "new": inserted, "warnings": warnings})
-    return 1 if warnings else 0
+           "new": inserted, "warnings": []})
+    return 0
 
 
 def cmd_decline(payload: dict) -> int:

@@ -85,6 +85,18 @@ def latest_account_value(audit: AuditLog) -> tuple[float | None, str | None]:
     return None, None
 
 
+def _fill_matches(approval: dict | None, fill: dict) -> bool:
+    if approval is None:
+        return False
+    intent = approval.get("intent", {})
+    try:
+        within = float(fill["qty"]) <= float(intent["qty"]) + 1e-9
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (within and str(fill.get("ticker", "")).upper() == str(intent.get("ticker", "")).upper()
+            and fill.get("side") == intent.get("side"))
+
+
 def pending_confirms(audit: AuditLog) -> tuple[PendingConfirm, ...]:
     """Approved CONFIRM-mode orders with neither a fill nor a decline
     reported against them.
@@ -94,15 +106,19 @@ def pending_confirms(audit: AuditLog) -> tuple[PendingConfirm, ...]:
     non-zero every day over an order nobody intended to place.
     """
     approved: dict[str, dict] = {}
-    filled: set[str] = set()
+    fills: list[dict] = []
     declined: set[str] = set()
     for rec in audit.records():
         if rec.get("kind") == "check" and rec.get("approved") and rec.get("requires_confirm"):
             approved[rec["approval_id"]] = rec
         elif rec.get("kind") == "fill" and not rec.get("orphan"):
-            filled.add(rec.get("approval_id"))
+            fills.append(rec)
         elif rec.get("kind") == "decline":
             declined.add(rec.get("approval_id"))
+    # A fill clears a pending confirm only if it actually matches the approval:
+    # same ticker and side, within the approved quantity.
+    filled = {f.get("approval_id") for f in fills
+              if _fill_matches(approved.get(f.get("approval_id")), f)}
     out = []
     for approval_id, rec in approved.items():
         if approval_id in filled or approval_id in declined:

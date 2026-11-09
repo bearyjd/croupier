@@ -94,6 +94,19 @@ def test_orphan_fill_does_not_clear_a_pending_confirm(tmp_path, audit, ledger):
     assert [p.approval_id for p in report.pending] == ["a1"]
 
 
+@pytest.mark.parametrize("ticker, side, qty", [
+    ("ACME", "sell", 1000),      # wrong side
+    ("BRVO", "buy", 1000),       # wrong ticker
+    ("ACME", "buy", 999999),     # overfill
+])
+def test_fill_that_does_not_match_its_approval_does_not_clear_a_pending_confirm(
+        tmp_path, audit, ledger, ticker, side, qty):
+    audit._append(_check_record("a1"))
+    audit.log_fill("a1", ticker, side, qty, 2.79, sleeve="event_driven")  # not flagged orphan
+    report = _build(tmp_path, audit, ledger)
+    assert [p.approval_id for p in report.pending] == ["a1"]
+
+
 def test_declined_approval_is_no_longer_pending(tmp_path, audit, ledger):
     """Regression: an approval the operator never acted on stayed pending
     forever — the log is append-only and nothing could retire it — so the

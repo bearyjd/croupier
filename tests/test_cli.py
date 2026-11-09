@@ -109,13 +109,29 @@ def test_fill_that_contradicts_its_approval_is_refused(workspace, monkeypatch, c
     assert code == 1 and out["ledger"] is False and "does not match approval" in out["error"]
 
 
-def test_overfill_is_recorded_but_flagged(workspace, monkeypatch, capsys):
+def test_overfill_is_recorded_as_an_orphan_and_refused(workspace, monkeypatch, capsys):
     _, verdict = _run(monkeypatch, capsys, ["check"], _order())
     code, out = _run(monkeypatch, capsys, ["fill"], {
         "approval_id": verdict["approval_id"], "ticker": "ACME",
         "side": "buy", "qty": 1500, "price": 2.79})       # approved 1000
-    assert code == 1 and out["ledger"] is True
-    assert any("overfill" in w for w in out["warnings"])
+    assert code == 1 and out["ledger"] is False
+    assert "overfill" in out["error"] and "ORPHAN" in out["error"]
+    assert _audit_lines(workspace)[-1]["orphan"] is True
+    assert not (workspace / "data" / "ledger.db").exists()
+
+
+def test_fill_after_decline_is_recorded_as_an_orphan_and_refused(
+        workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["decline"], {
+        "approval_id": verdict["approval_id"], "reason": "operator said N"})
+    code, out = _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": verdict["approval_id"], "ticker": "ACME",
+        "side": "buy", "qty": 999999, "price": 2.79})
+    assert code == 1 and out["ledger"] is False
+    assert "declined" in out["error"] and "ORPHAN" in out["error"]
+    assert _audit_lines(workspace)[-1]["orphan"] is True
+    assert not (workspace / "data" / "ledger.db").exists()
 
 
 def test_rejected_check_yields_no_approval_id(workspace, monkeypatch, capsys):
