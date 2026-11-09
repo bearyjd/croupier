@@ -10,10 +10,20 @@ Trading semantics of each state (enforced by venue/data gates + AGENT.md):
 from __future__ import annotations
 
 import logging
+import math
 
 from croupier.data.base import DataHealth, MarketData, Quote
 
 log = logging.getLogger(__name__)
+
+
+def _usable(q: Quote | None) -> Quote | None:
+    """A NaN/inf/non-positive price is a miss, not a quote: it would otherwise
+    suppress the fallback and poison every valuation built on it."""
+    if q is not None and not (math.isfinite(q.price) and q.price > 0):
+        log.warning("discarding unusable quote for %s: price %r", q.ticker, q.price)
+        return None
+    return q
 
 
 class DataRouter:
@@ -38,7 +48,7 @@ class DataRouter:
 
     async def quote(self, ticker: str) -> Quote | None:
         if self.primary is not None and self.primary.health() == DataHealth.FRESH:
-            q = await self.primary.quote(ticker)
+            q = _usable(await self.primary.quote(ticker))
             if q is not None:
                 return q
             log.warning("primary quote miss for %s; falling back", ticker)
@@ -48,4 +58,4 @@ class DataRouter:
             # request spent on a question already answered. The next call
             # that queries health() elsewhere still re-observes normally.
             return None
-        return await self.fallback.quote(ticker)
+        return _usable(await self.fallback.quote(ticker))

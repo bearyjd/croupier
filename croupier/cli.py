@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +27,7 @@ from croupier.journal import write as write_journal
 from croupier.journal_render import render as render_journal
 from croupier.ledger import LEDGER_PATH, Ledger, LedgerConflict, new_fill
 from croupier.marking import mark_to_market
-from croupier.models import AccountSnapshot, OrderIntent
+from croupier.models import AccountSnapshot, OrderIntent, require_finite
 from croupier.policy import load as load_full_policy
 
 AUDIT_PATH = Path("data/audit.jsonl")
@@ -34,6 +35,11 @@ AUDIT_PATH = Path("data/audit.jsonl")
 
 def _emit(obj: object) -> None:
     print(json.dumps(obj, indent=2, default=str))
+
+
+def _reject_nonfinite(literal: str) -> float:
+    """json.load's parse_constant hook: bare NaN/Infinity/-Infinity are not JSON."""
+    raise ValueError(f"non-finite number {literal} is not accepted")
 
 
 def cmd_check(payload: dict) -> int:
@@ -92,6 +98,18 @@ def cmd_fill(payload: dict) -> int:
     approval_id = payload["approval_id"]
     ticker, side = payload["ticker"], payload["side"]
     qty, price = payload["qty"], payload["price"]
+    try:
+        if not isinstance(ticker, str) or not isinstance(side, str):
+            raise ValueError("ticker and side must be text")
+        require_finite(qty=qty, price=price)
+        if qty <= 0 or price <= 0:
+            raise ValueError("qty and price must be positive")
+    except ValueError as exc:
+        # Not a fill any approval could cover; never reaches the ledger, but
+        # still goes on the record.
+        log.log_fill(approval_id, ticker, side, qty, price, orphan=True)
+        _emit({"logged": True, "ledger": False, "error": f"{exc}; recorded as ORPHAN"})
+        return 2
 
     approval = log.find_approval(approval_id)
     if approval is None:
@@ -251,12 +269,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "auth-status":
         return cmd_auth_status()
 
-    payload = json.load(sys.stdin)
-    if args.cmd == "check":
-        return cmd_check(payload)
-    if args.cmd == "decline":
-        return cmd_decline(payload)
-    return cmd_fill(payload)
+    try:
+        payload = json.load(sys.stdin, parse_constant=_reject_nonfinite)
+    except (ValueError, RecursionError) as exc:
+        _emit({"error": f"invalid JSON on stdin: {exc}"})
+        return 2
+    handler = {"check": cmd_check, "decline": cmd_decline}.get(args.cmd, cmd_fill)
+    try:
+        return handler(payload)
+    except (ValueError, TypeError, OverflowError, RecursionError,
+            sqlite3.IntegrityError) as exc:
+        _emit({"error": f"invalid input: {exc}"})
+        return 2
 
 
 if __name__ == "__main__":

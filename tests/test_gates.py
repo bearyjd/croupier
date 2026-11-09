@@ -218,3 +218,52 @@ def test_the_opt_out_does_not_disturb_exits_or_confirm_sleeves():
     assert sell.approved
     confirm = check(_intent(), _cfg(), _snap(), data_health=DataHealth.DEGRADED)
     assert confirm.approved and confirm.requires_confirm
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["qty", "limit_price", "adv_shares"])
+def test_order_intent_rejects_nonfinite(bad, field):
+    kw = dict(sleeve="s", ticker="ACME", side="buy", qty=1.0, limit_price=1.0,
+              signal_refs=("x",), thesis="t")
+    kw[field] = bad
+    with pytest.raises(ValueError, match="finite"):
+        OrderIntent(**kw)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_account_snapshot_rejects_nonfinite(bad):
+    with pytest.raises(ValueError, match="finite"):
+        AccountSnapshot(total_value=bad, cash=1.0)
+    with pytest.raises(ValueError, match="finite"):
+        AccountSnapshot(total_value=1.0, cash=bad)
+    with pytest.raises(ValueError, match="finite"):
+        AccountSnapshot(total_value=1.0, cash=1.0, sleeve_cost_basis={"s": bad})
+    with pytest.raises(ValueError, match="finite"):
+        AccountSnapshot(total_value=1.0, cash=1.0, position_cost_basis={"A": bad})
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_check_rejects_nonfinite_auto_spent_and_held_qty(bad):
+    with pytest.raises(ValueError, match="finite"):
+        check(_intent(), _cfg(), _snap(), auto_spent_today=bad)
+    with pytest.raises(ValueError, match="finite"):
+        check(_intent(side="sell"), _cfg(), _snap(), held_qty=bad)
+
+
+def test_negative_amounts_cannot_cancel_caps():
+    with pytest.raises(ValueError, match="non-negative"):
+        check(_intent(), _cfg(), _snap(), auto_spent_today=-1e9)
+    with pytest.raises(ValueError, match="non-negative"):
+        AccountSnapshot(total_value=1.0, cash=1.0, sleeve_cost_basis={"s": -1e9})
+    with pytest.raises(ValueError, match="non-negative"):
+        AccountSnapshot(total_value=1.0, cash=1.0, position_cost_basis={"A": -1e9})
+    with pytest.raises(ValueError, match="non-negative"):
+        check(_intent(side="sell"), _cfg(), _snap(), held_qty=-5.0)
+
+
+@pytest.mark.parametrize("bad", [True, "5", None])
+def test_order_intent_rejects_bool_and_non_numbers(bad):
+    with pytest.raises(ValueError, match="finite number"):
+        _intent(qty=bad)
+    with pytest.raises(ValueError, match="finite number"):
+        _intent(limit_price=bad)

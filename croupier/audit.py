@@ -6,6 +6,7 @@ BEFORE returning the verdict. Exportable as-is for compliance review.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict
 from datetime import date
@@ -15,6 +16,40 @@ from croupier.catalysts import CatalystCalendar
 from croupier.data.base import DataHealth
 from croupier.gates.pipeline import PolicyConfig, check
 from croupier.models import AccountSnapshot, OrderIntent, Verdict, utcnow
+
+_MAX_LOGGED_INT = 2**63
+
+
+def _clean(value: object) -> object:
+    """Make a record strict-JSON safe, recursively.
+
+    Non-finite floats and absurdly large ints become text: a hostile value
+    must be recorded, never raise and suppress the record.
+    """
+    if isinstance(value, dict):
+        return {k: _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= _MAX_LOGGED_INT:
+        return str(value)
+    return value
+
+
+def _safe_clean(record: dict) -> dict:
+    """_clean, but a value nested past the recursion limit is summarised
+    rather than raised: the record must still be written."""
+    try:
+        return _clean(record)
+    except RecursionError:
+        out = {}
+        for key, value in record.items():
+            try:
+                out[key] = _clean(value)
+            except RecursionError:
+                out[key] = "<value too deeply nested to log>"
+        return out
 
 
 class AuditLog:
@@ -117,6 +152,6 @@ class AuditLog:
 
     def _append(self, record: dict) -> None:
         with open(self.path, "a") as f:
-            f.write(json.dumps(record, default=str) + "\n")
+            f.write(json.dumps(_safe_clean(record), default=str, allow_nan=False) + "\n")
             f.flush()
             os.fsync(f.fileno())

@@ -75,7 +75,9 @@ that come back `approved: true` and recording the `approval_id`.
 ### `croupier check` — gate an order
 
 Reads one order intent as JSON on stdin, writes the verdict as JSON on
-stdout. Exit code `0` = approved, `1` = rejected.
+stdout. Exit code `0` = approved, `1` = rejected, `2` = invalid input
+(malformed JSON, non-finite or non-numeric amounts, bad types); `fill` and
+`decline` exit 2 on invalid input too, after recording the report in the audit log.
 
 ```bash
 croupier check < examples/order.json

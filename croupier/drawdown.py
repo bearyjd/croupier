@@ -22,6 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+from croupier.models import require_finite
+
 # Below this the sleeve had no meaningful capital at risk; the day is flat.
 _MIN_BASE_USD = 1e-9
 
@@ -50,7 +52,12 @@ def advance(
     market_value: float,
     net_flow: float,
 ) -> EquityPoint:
-    """Return the next EquityPoint. Pure: never mutates ``prev``."""
+    """Return the next EquityPoint. Pure: never mutates ``prev``.
+
+    A non-finite input would make the high-water mark inf and blind every
+    later drawdown check, so it is refused here rather than propagated.
+    """
+    require_finite(market_value=market_value, net_flow=net_flow)
     prev_mv = prev.market_value if prev is not None else 0.0
     prev_index = prev.twr_index if prev is not None else 1.0
     prev_hwm = prev.hwm_index if prev is not None else 1.0

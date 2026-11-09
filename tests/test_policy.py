@@ -84,3 +84,20 @@ def test_shipped_example_is_a_working_starting_point(tmp_path):
                         tmp_path / "data" / "sleeve_state.yaml",
                         tmp_path / "config" / "catalysts.yaml")
     assert p.config.sleeves and p.catalysts.events == ()   # no calendar yet is fine
+
+
+@pytest.mark.parametrize("key", ["auto_order_max_usd", "auto_daily_max_usd",
+                                 "budget_pct", "position_max_pct"])
+@pytest.mark.parametrize("bad", [".nan", ".inf", "-.inf", "-5"])
+def test_policy_rejects_non_finite_or_negative_numbers(tmp_path, key, bad):
+    import re
+    ws = _workspace(tmp_path)
+    path = ws / "config" / "policy.yaml"
+    text = path.read_text()
+    new, n = re.subn(rf"^(\s*{key}:).*$", rf"\g<1> {bad}", text, count=1, flags=re.M)
+    if n == 0:   # key not in the example: add it to the first sleeve
+        new = re.sub(r"^(\s*)budget_pct:", rf"\g<1>{key}: {bad}\n\g<1>budget_pct:",
+                     text, count=1, flags=re.M)
+    path.write_text(new)
+    with pytest.raises(ValueError, match="finite|non-negative"):
+        _load(ws)

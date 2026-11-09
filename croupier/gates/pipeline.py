@@ -19,6 +19,7 @@ from croupier.models import (
     OrderIntent,
     Verdict,
     approval_id_for,
+    require_non_negative,
     utcnow,
 )
 
@@ -39,6 +40,12 @@ class SleeveConfig:
     # sleeve whose entry rule genuinely does not depend on an intraday quote
     # may claim it. Never relaxes DEAD, and never touches exits.
     auto_entries_on_degraded: bool = False
+
+    def __post_init__(self) -> None:
+        require_non_negative(
+            budget_pct=self.budget_pct, position_max_pct=self.position_max_pct,
+            auto_order_max_usd=self.auto_order_max_usd,
+            auto_daily_max_usd=self.auto_daily_max_usd)
 
 
 @dataclass(frozen=True)
@@ -214,6 +221,9 @@ def check(intent: OrderIntent, cfg: PolicyConfig, snap: AccountSnapshot,
           calendar: CatalystCalendar | None = None,
           today: date | None = None,
           held_qty: float | None = None) -> Verdict:
+    require_non_negative(auto_spent_today=auto_spent_today)
+    if held_qty is not None:
+        require_non_negative(held_qty=held_qty)
     sc = cfg.sleeves.get(intent.sleeve)
     cal = calendar or CatalystCalendar.empty()
     # Freezes gate *adds* only: an exit into a catalyst never needs a

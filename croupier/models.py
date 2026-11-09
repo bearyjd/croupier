@@ -8,6 +8,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -21,6 +22,29 @@ class Mode(enum.StrEnum):
 class DenyLevel(enum.StrEnum):
     NO_TRADE = "no_trade"
     ETF_ONLY = "etf_only"
+
+
+def require_finite(**values: float) -> None:
+    """NaN and +/-inf make every ``x > cap`` gate comparison False (fail open).
+
+    bool is an int subclass and strings reach here from JSON, so both are refused.
+    """
+    for name, value in values.items():
+        try:
+            ok = (not isinstance(value, bool) and isinstance(value, (int, float))
+                  and math.isfinite(value))
+        except OverflowError:          # an int too large for a float
+            ok = False
+        if not ok:
+            raise ValueError(f"{name} must be a finite number, got {value!r}")
+
+
+def require_non_negative(**values: float) -> None:
+    """Finite and >= 0: a negative amount would cancel a cap it is added to."""
+    require_finite(**values)
+    for name, value in values.items():
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -41,6 +65,9 @@ class OrderIntent:
             raise ValueError("OrderIntent requires non-empty public signal_refs (PRP-001 inv. 2)")
         if self.side not in ("buy", "sell"):
             raise ValueError(f"bad side {self.side!r}")
+        require_finite(qty=self.qty, limit_price=self.limit_price)
+        if self.adv_shares is not None:
+            require_finite(adv_shares=self.adv_shares)
         if self.qty <= 0 or self.limit_price <= 0:
             raise ValueError("qty and limit_price must be positive")
 
@@ -58,6 +85,12 @@ class AccountSnapshot:
     sleeve_cost_basis: dict[str, float] = field(default_factory=dict)
     # ticker -> current position cost basis (across sleeves)
     position_cost_basis: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        require_finite(total_value=self.total_value, cash=self.cash)
+        require_non_negative(
+            **{f"sleeve_cost_basis[{k}]": v for k, v in self.sleeve_cost_basis.items()},
+            **{f"position_cost_basis[{k}]": v for k, v in self.position_cost_basis.items()})
 
 
 @dataclass(frozen=True)

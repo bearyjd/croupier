@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Grepon Labs
 """Daily mark-to-market and the automatic 25% drawdown halt. No network."""
+import json
 from datetime import UTC, date, datetime
 
 import pytest
@@ -317,3 +318,84 @@ async def test_the_next_day_still_builds_on_the_previous_day(
     (m,) = day2.marks
     assert m.point.drawdown_pct == pytest.approx(20.0, abs=0.01), (
         "a 20% fall the next day must read as a 20% drawdown")
+
+
+async def test_overflowing_quote_cannot_poison_the_high_water_mark(
+        led, fake_router, tmp_path, monkeypatch):
+    """Day 2 quotes 1e306 (value -> inf); day 3 is a real 28.6% drawdown. The
+    halt must still fire, be persisted, and be audited."""
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    D3 = date(2026, 8, 28)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    for price, day in ((2.80, D1), (1e306, D2)):
+        r = await mark_to_market(led, fake_router({"ACME": price}), SleeveState.empty(),
+                                 max_drawdown_pct=25.0, as_of=day, audit=audit)
+    # the overflowing quote is treated as unpriced (carried at cost), not as a halt
+    assert r.marks[0].unpriced == ("ACME",) and not r.state.is_halted(SLEEVE)
+    result = await mark_to_market(led, fake_router({"ACME": 2.00}), SleeveState.empty(),
+                                  max_drawdown_pct=25.0, as_of=D3, audit=audit)
+    assert result.state.is_halted(SLEEVE)
+    assert SleeveState.load(tmp_path / "data" / "sleeve_state.yaml").is_halted(SLEEVE)
+    assert "sleeve_halted" in (tmp_path / "audit.jsonl").read_text()
+
+
+async def test_a_non_finite_book_halts_the_sleeve_instead_of_raising(
+        led, fake_router, tmp_path, monkeypatch):
+    """A pre-fix ledger row with inf in it must not make every later mark raise."""
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    led._conn.execute("UPDATE fills SET qty = 1e999")      # legacy inf row
+    led._conn.commit()
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    result = await mark_to_market(led, fake_router({"ACME": 2.80}), SleeveState.empty(),
+                                  max_drawdown_pct=25.0, as_of=D2, audit=audit)
+    assert result.state.is_halted(SLEEVE)
+    assert SleeveState.load(tmp_path / "data" / "sleeve_state.yaml").is_halted(SLEEVE)
+    assert "non-finite" in (tmp_path / "audit.jsonl").read_text()
+
+
+class _ExplodingAudit:
+    def log_event(self, *_a, **_k):
+        raise RuntimeError("audit disk full")
+
+
+async def test_halt_is_persisted_before_the_audit_event_is_written(
+        led, fake_router, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    await mark_to_market(led, fake_router({"ACME": 2.80}), SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D1)
+    await mark_to_market(led, fake_router({"ACME": 2.00}), SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D2, audit=_ExplodingAudit())
+    assert SleeveState.load(tmp_path / "data" / "sleeve_state.yaml").is_halted(SLEEVE)
+
+
+async def test_carrying_at_cost_is_audited_and_health_is_not_fresh(
+        led, fake_router, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    result = await mark_to_market(led, fake_router({"ACME": float("nan")}),
+                                  SleeveState.empty(), max_drawdown_pct=25.0,
+                                  as_of=D1, audit=audit)
+    assert result.marks[0].unpriced == ("ACME",)
+    assert result.data_health != DataHealth.FRESH
+    rec = [json.loads(x) for x in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    (ev,) = [r for r in rec if r.get("event") == "unpriced_carried_at_cost"]
+    assert ev["sleeve"] == SLEEVE and ev["tickers"] == ["ACME"]
+
+
+async def test_a_failing_audit_write_does_not_stop_later_sleeves(
+        led, fake_router, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for i, sleeve in enumerate(("alpha", "beta")):       # sorted: alpha first
+        led.record_fill(Fill(f"a{i}", sleeve, f"T{i}", "buy", 1000, 2.80,
+                             datetime(D1.year, D1.month, D1.day, 14, tzinfo=UTC)))
+    prices = {"T0": 2.80, "T1": 2.80}
+    await mark_to_market(led, fake_router(prices), SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D1)
+    result = await mark_to_market(led, fake_router({"T0": 1.0, "T1": 1.0}),
+                                  SleeveState.empty(), max_drawdown_pct=25.0,
+                                  as_of=D2, audit=_ExplodingAudit())
+    assert result.state.is_halted("alpha") and result.state.is_halted("beta")
