@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import fcntl
 import json
 import math
 import sqlite3
@@ -438,7 +440,7 @@ def cmd_reconcile(handle: str, qty: float, price: float, reason: str,
             "; ".join(problems) + "; if the operator has confirmed these "
             "values with the broker, repeat with --force")})
         return 1
-    with Ledger(LEDGER_PATH) as ledger:
+    with _reconcile_lock(), Ledger(LEDGER_PATH) as ledger:
         intent_key = next((r.get("ledger_key") for r in log.records()
                            if r.get("kind") == "event" and r.get("event") == "reconcile_intent"
                            and r.get("fill_id") == handle), None)
@@ -487,6 +489,22 @@ def cmd_reconcile(handle: str, qty: float, price: float, reason: str,
            "reported_qty": rec.get("qty"), "reported_price": rec.get("price"),
            "force": force, "reason": reason})
     return 0
+
+
+@contextlib.contextmanager
+def _reconcile_lock():
+    """Serialise the read-pick-insert of concurrent reconciles: two operators
+    on one fill must not both pick a key and insert (a double count). The
+    intent records are read AFTER this is held, so the second run sees the
+    first's intent and ledger row and replays instead."""
+    path = LEDGER_PATH.parent / "reconcile.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def _same_fill(a, b) -> bool:
