@@ -33,17 +33,17 @@ def render(report: JournalReport) -> str:
     if banner:
         out += [f"> {banner}", ""]
     if report.auth.nag:
-        out += [f"> **RE-AUTH NAG** — {report.auth.detail}", ""]
+        out += [f"> **RE-AUTH NAG** — {_md(report.auth.detail)}", ""]
 
     out += ["## Status", ""]
     out += [f"- data feed: `{report.data_health}`"]
-    out += [f"- schwab auth: {report.auth.detail}"]
+    out += [f"- schwab auth: {_md(report.auth.detail)}"]
     if report.account_value is None:
         out += ["- account value: _unknown_ — no check has supplied a snapshot yet; "
                 "sleeve ceilings cannot be sized"]
     else:
         out += [f"- account value: {_usd(report.account_value)} "
-                f"(agent snapshot at {report.account_snapshot_ts})"]
+                f"(agent snapshot at {_md(report.account_snapshot_ts)})"]
     out += [""]
 
     out += ["## Sleeves", ""]
@@ -81,7 +81,8 @@ def render(report: JournalReport) -> str:
     if report.halts:
         out += ["Clearing a halt is a human act: review, then delete the entry "
                 "from `data/sleeve_state.yaml`.", ""]
-        out += [f"- **{_md(h.sleeve)}** — {_md(h.reason)} (since {h.since})" for h in report.halts]
+        out += [f"- **{_md(h.sleeve)}** — {_md(h.reason)} (since {_md(h.since)})"
+                for h in report.halts]
     else:
         out += ["_none_"]
     out += [""]
@@ -115,7 +116,7 @@ def _sleeve_block(s: SleeveLine) -> str:
     if s.halt is not None:
         lines.append(f"    - HALTED: {_md(s.halt.reason)}")
     for p in s.positions:
-        lines.append(f"    - {p.ticker}: {p.qty:,.0f} sh @ {_usd(p.avg_cost)} avg, "
+        lines.append(f"    - {_md(p.ticker)}: {p.qty:,.0f} sh @ {_usd(p.avg_cost)} avg, "
                      f"basis {_usd(p.cost_basis)}")
     if not s.positions:
         lines.append("    - no open positions")

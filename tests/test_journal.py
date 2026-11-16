@@ -339,3 +339,16 @@ def test_agent_supplied_fill_fields_cannot_inject_markdown_into_the_journal(
     assert text.count("## Halts (") == 1
     assert "\n_none_\n<img" not in text
     assert "\\<img" in text and "\n<img" not in text
+
+
+def test_position_ticker_auth_detail_and_snapshot_ts_are_escaped(tmp_path, audit, ledger):
+    import dataclasses
+    ledger.record_fill(Fill("a1", "event_driven", "AC<b>ME", "buy", 10, 2.0,
+                            datetime(2026, 8, 28, 14, tzinfo=UTC)))
+    report = _build(tmp_path, audit, ledger)
+    report = dataclasses.replace(
+        report, account_snapshot_ts="<i>ts</i>",
+        auth=dataclasses.replace(report.auth, nag=True, detail="x\n## FORGED <u>"))
+    text = render(report)
+    assert "AC<b>ME" not in text and "<i>ts" not in text
+    assert "\n## FORGED" not in text and "<u>" not in text
