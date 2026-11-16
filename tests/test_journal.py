@@ -318,3 +318,14 @@ def test_naive_and_malformed_audit_ts_do_not_crash_the_journal(tmp_path, audit, 
                    "price": 1, "reason": "r"})
     report = _build(tmp_path, audit, ledger)                           # must not raise
     assert [f.fill_id for f in report.forced] == ["ok"]
+
+
+def test_agent_supplied_thesis_cannot_inject_markdown_into_the_journal(
+        tmp_path, audit, ledger):
+    rec = _check_record("a1")
+    rec["intent"]["thesis"] = "ok\n## FORGED\n_none_\n<script>x</script> [a](http://e)"
+    audit._append(rec)
+    text = render(_build(tmp_path, audit, ledger))
+    assert "\n## FORGED" not in text
+    assert "<script>" not in text
+    assert "[a](" not in text

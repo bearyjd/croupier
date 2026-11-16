@@ -8,6 +8,8 @@ operator never reads a different report from the one on disk.
 """
 from __future__ import annotations
 
+import re
+
 from croupier.catalysts import CatalystEvent
 from croupier.data.base import DataHealth
 from croupier.journal import FillIssue, JournalReport, PendingConfirm, SleeveLine
@@ -72,14 +74,14 @@ def render(report: JournalReport) -> str:
         for f in report.forced:
             out += [f"- `{f.fill_id}` {f.side} {f.ticker}: recorded {f.qty:,.0f} @ "
                     f"{f.price} (reported {f.reported_qty} @ {f.reported_price}) "
-                    f"at {f.ts}", f"    - reason: {f.reason}"]
+                    f"at {f.ts}", f"    - reason: {_md(f.reason)}"]
         out += [""]
 
     out += [f"## Halts ({len(report.halts)})", ""]
     if report.halts:
         out += ["Clearing a halt is a human act: review, then delete the entry "
                 "from `data/sleeve_state.yaml`.", ""]
-        out += [f"- **{h.sleeve}** — {h.reason} (since {h.since})" for h in report.halts]
+        out += [f"- **{h.sleeve}** — {_md(h.reason)} (since {h.since})" for h in report.halts]
     else:
         out += ["_none_"]
     out += [""]
@@ -110,7 +112,7 @@ def _sleeve_block(s: SleeveLine) -> str:
                     + (f" ({used:.1f}%)" if used is not None else ""))
     lines = [headline]
     if s.halt is not None:
-        lines.append(f"    - HALTED: {s.halt.reason}")
+        lines.append(f"    - HALTED: {_md(s.halt.reason)}")
     for p in s.positions:
         lines.append(f"    - {p.ticker}: {p.qty:,.0f} sh @ {_usd(p.avg_cost)} avg, "
                      f"basis {_usd(p.cost_basis)}")
@@ -122,7 +124,7 @@ def _sleeve_block(s: SleeveLine) -> str:
 def _issue_block(i: FillIssue) -> str:
     return "\n".join([
         f"- `{i.approval_id}` {i.side} {i.qty} {i.ticker} — reported {i.ts}",
-        *[f"    - {p}" for p in i.problems],
+        *[f"    - {_md(p)}" for p in i.problems],
         "    - acknowledge: " + (f"`croupier ack-fill {i.match_id} --reason ...`"
                                  if i.match_id else
                                  f"`croupier ack-fill --handle {i.handle} --reason ...`"),
@@ -133,7 +135,7 @@ def _pending_block(p: PendingConfirm) -> str:
     return "\n".join([
         f"- `{p.approval_id}` **{p.sleeve}** {p.side.upper()} {p.qty:,.0f} "
         f"{p.ticker} @ {_usd(p.limit_price)}",
-        f"    - {p.thesis}" if p.thesis else "    - _no thesis recorded_",
+        f"    - {_md(p.thesis)}" if p.thesis else "    - _no thesis recorded_",
         f"    - approved {p.ts}",
     ])
 
@@ -148,10 +150,18 @@ def _freeze_block(e: CatalystEvent, trading_days: int) -> str:
         lines.append("    - UNVERIFIED window — confirm against the public source "
                      "before relying on it")
     if e.note:
-        lines.append(f"    - {e.note.strip()}")
+        lines.append(f"    - {_md(e.note)}")
     lines.append(f"    - source: {e.source_url}")
     return "\n".join(lines)
 
 
 def _usd(value: float) -> str:
     return f"${value:,.2f}" if abs(value) < 100 else f"${value:,.0f}"
+
+
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+!|<>~])")
+
+
+def _md(text: str) -> str:
+    """Neutralise agent-supplied text: one line, Markdown/HTML syntax escaped."""
+    return _MD_SPECIAL.sub(r"\\\1", " ".join(str(text).split()))
