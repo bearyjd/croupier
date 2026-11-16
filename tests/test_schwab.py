@@ -77,7 +77,6 @@ def test_token_file_is_never_created_world_readable(tmp_path, monkeypatch):
 
 def test_preexisting_loose_token_file_is_tightened_before_write(tmp_path, monkeypatch):
     """O_TRUNC ignores the mode arg on an existing file; fchmod must tighten it first."""
-    import os
     tok = tmp_path / "tok.json"
     tok.write_text("{}")
     tok.chmod(0o644)
