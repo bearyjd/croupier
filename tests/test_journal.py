@@ -238,7 +238,7 @@ def test_active_freeze_renders_in_its_own_section(tmp_path, audit, ledger):
         verified=False, note="lead asset mono readout"), ))
     text = render(_build(tmp_path, audit, ledger, calendar=cal))   # DAY is inside
     assert "## Catalyst freezes (1)" in text
-    assert "**ACME** phase_data_readout" in text
+    assert "**ACME** phase\\_data\\_readout" in text
     assert "UNVERIFIED window" in text
     assert "sec.gov" in text
 
@@ -329,3 +329,13 @@ def test_agent_supplied_thesis_cannot_inject_markdown_into_the_journal(
     assert "\n## FORGED" not in text
     assert "<script>" not in text
     assert "[a](" not in text
+
+
+def test_agent_supplied_fill_fields_cannot_inject_markdown_into_the_journal(
+        tmp_path, audit, ledger):
+    audit.log_fill("zz", "X\n\n## Halts (0)\n\n_none_\n<img src=x>", "buy`", 1, 1,
+                   orphan=True)
+    text = render(_build(tmp_path, audit, ledger))
+    assert text.count("## Halts (") == 1
+    assert "\n_none_\n<img" not in text
+    assert "\\<img" in text and "\n<img" not in text

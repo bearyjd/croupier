@@ -72,16 +72,16 @@ def render(report: JournalReport) -> str:
         out += [f"## Forced reconciles, last 24h ({len(report.forced)})", "",
                 "FLAGGED: the operator lifted the plausibility bands with `--force`.", ""]
         for f in report.forced:
-            out += [f"- `{f.fill_id}` {f.side} {f.ticker}: recorded {f.qty:,.0f} @ "
-                    f"{f.price} (reported {f.reported_qty} @ {f.reported_price}) "
-                    f"at {f.ts}", f"    - reason: {_md(f.reason)}"]
+            out += [f"- {_code(f.fill_id)} {_md(f.side)} {_md(f.ticker)}: recorded "
+                    f"{f.qty:,.0f} @ {f.price} (reported {_md(f.reported_qty)} @ "
+                    f"{_md(f.reported_price)}) at {_md(f.ts)}", f"    - reason: {_md(f.reason)}"]
         out += [""]
 
     out += [f"## Halts ({len(report.halts)})", ""]
     if report.halts:
         out += ["Clearing a halt is a human act: review, then delete the entry "
                 "from `data/sleeve_state.yaml`.", ""]
-        out += [f"- **{h.sleeve}** — {_md(h.reason)} (since {h.since})" for h in report.halts]
+        out += [f"- **{_md(h.sleeve)}** — {_md(h.reason)} (since {h.since})" for h in report.halts]
     else:
         out += ["_none_"]
     out += [""]
@@ -101,13 +101,13 @@ def render(report: JournalReport) -> str:
 
 def _sleeve_block(s: SleeveLine) -> str:
     if s.ceiling is None:
-        headline = f"- **{s.sleeve}** — `{s.mode}` — basis {_usd(s.cost_basis)} (ceiling unknown)"
+        headline = f"- **{_md(s.sleeve)}** — {_code(s.mode)} — basis {_usd(s.cost_basis)} (ceiling unknown)"
     elif s.ceiling == 0:
-        headline = (f"- **{s.sleeve}** — `{s.mode}` — budget 0, no capital allocated "
+        headline = (f"- **{_md(s.sleeve)}** — {_code(s.mode)} — budget 0, no capital allocated "
                     f"(basis {_usd(s.cost_basis)})")
     else:
         used = s.utilisation_pct
-        headline = (f"- **{s.sleeve}** — `{s.mode}` — {_usd(s.cost_basis)} of "
+        headline = (f"- **{_md(s.sleeve)}** — {_code(s.mode)} — {_usd(s.cost_basis)} of "
                     f"{_usd(s.ceiling)} ceiling"
                     + (f" ({used:.1f}%)" if used is not None else ""))
     lines = [headline]
@@ -123,26 +123,27 @@ def _sleeve_block(s: SleeveLine) -> str:
 
 def _issue_block(i: FillIssue) -> str:
     return "\n".join([
-        f"- `{i.approval_id}` {i.side} {i.qty} {i.ticker} — reported {i.ts}",
+        f"- {_code(i.approval_id)} {_md(i.side)} {_md(i.qty)} {_md(i.ticker)} — "
+        f"reported {_md(i.ts)}",
         *[f"    - {_md(p)}" for p in i.problems],
-        "    - acknowledge: " + (f"`croupier ack-fill {i.match_id} --reason ...`"
+        "    - acknowledge: " + (f"{_code(f'croupier ack-fill {i.match_id} --reason ...')}"
                                  if i.match_id else
-                                 f"`croupier ack-fill --handle {i.handle} --reason ...`"),
+                                 f"{_code(f'croupier ack-fill --handle {i.handle} --reason ...')}"),
     ])
 
 
 def _pending_block(p: PendingConfirm) -> str:
     return "\n".join([
-        f"- `{p.approval_id}` **{p.sleeve}** {p.side.upper()} {p.qty:,.0f} "
-        f"{p.ticker} @ {_usd(p.limit_price)}",
+        f"- {_code(p.approval_id)} **{_md(p.sleeve)}** {_md(p.side.upper())} "
+        f"{p.qty:,.0f} {_md(p.ticker)} @ {_usd(p.limit_price)}",
         f"    - {_md(p.thesis)}" if p.thesis else "    - _no thesis recorded_",
-        f"    - approved {p.ts}",
+        f"    - approved {_md(p.ts)}",
     ])
 
 
 def _freeze_block(e: CatalystEvent, trading_days: int) -> str:
     lines = [
-        f"- **{e.ticker}** {e.event_type} — window "
+        f"- **{_md(e.ticker)}** {_md(e.event_type)} — window "
         f"{e.window_start.isoformat()}..{e.window_end.isoformat()}, "
         f"frozen since {e.freeze_start(trading_days).isoformat()}",
     ]
@@ -151,7 +152,7 @@ def _freeze_block(e: CatalystEvent, trading_days: int) -> str:
                      "before relying on it")
     if e.note:
         lines.append(f"    - {_md(e.note)}")
-    lines.append(f"    - source: {e.source_url}")
+    lines.append(f"    - source: {_md(e.source_url)}")
     return "\n".join(lines)
 
 
@@ -165,3 +166,8 @@ _MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+!|<>~])")
 def _md(text: str) -> str:
     """Neutralise agent-supplied text: one line, Markdown/HTML syntax escaped."""
     return _MD_SPECIAL.sub(r"\\\1", " ".join(str(text).split()))
+
+
+def _code(text: object) -> str:
+    """Agent-supplied text inside a code span: one line, no backtick to break out."""
+    return "`" + " ".join(str(text).replace("`", "'").split()) + "`"
