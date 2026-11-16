@@ -58,9 +58,9 @@ class TokenState:
         })
         # Create with 0o600 so the file is never briefly world-readable.
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(fd, 0o600)  # O_TRUNC keeps a pre-existing file's looser mode; tighten before writing
         with os.fdopen(fd, "w") as f:
             f.write(payload)
-        path.chmod(0o600)  # tighten a pre-existing file with looser mode
 
     @property
     def refresh_expires_at(self) -> datetime:

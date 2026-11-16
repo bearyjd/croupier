@@ -67,13 +67,23 @@ def test_token_file_is_never_created_world_readable(tmp_path, monkeypatch):
     """Mode must be restricted at creation, not by a later chmod (race window)."""
     import os
     monkeypatch.setattr("pathlib.Path.chmod", lambda *a, **k: None)
-    monkeypatch.setattr(os, "fchmod", lambda *a, **k: None, raising=False)
     old = os.umask(0)
     try:
         _tokens(tmp_path)
     finally:
         os.umask(old)
     assert (tmp_path / "tok.json").stat().st_mode & 0o077 == 0
+
+
+def test_preexisting_loose_token_file_is_tightened_before_write(tmp_path, monkeypatch):
+    """O_TRUNC ignores the mode arg on an existing file; fchmod must tighten it first."""
+    import os
+    tok = tmp_path / "tok.json"
+    tok.write_text("{}")
+    tok.chmod(0o644)
+    monkeypatch.setattr("pathlib.Path.chmod", lambda *a, **k: None)
+    _tokens(tmp_path)
+    assert tok.stat().st_mode & 0o077 == 0
 
 
 def test_token_file_is_written_owner_only(tmp_path):
