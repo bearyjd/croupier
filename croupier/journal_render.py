@@ -101,7 +101,8 @@ def render(report: JournalReport) -> str:
 
 def _sleeve_block(s: SleeveLine) -> str:
     if s.ceiling is None:
-        headline = f"- **{_md(s.sleeve)}** — {_code(s.mode)} — basis {_usd(s.cost_basis)} (ceiling unknown)"
+        headline = (f"- **{_md(s.sleeve)}** — {_code(s.mode)} — basis {_usd(s.cost_basis)} "
+                    "(ceiling unknown)")
     elif s.ceiling == 0:
         headline = (f"- **{_md(s.sleeve)}** — {_code(s.mode)} — budget 0, no capital allocated "
                     f"(basis {_usd(s.cost_basis)})")
