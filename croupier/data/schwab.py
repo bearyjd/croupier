@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -49,13 +50,18 @@ class TokenState:
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
+        payload = json.dumps({
             "access_token": self.access_token,
             "refresh_token": self.refresh_token,
             "access_expires_at": self.access_expires_at.isoformat(),
             "refresh_issued_at": self.refresh_issued_at.isoformat(),
-        }))
-        path.chmod(0o600)
+        })
+        # Create with 0o600 so the file is never briefly world-readable.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # O_TRUNC keeps a pre-existing file's looser mode; tighten before writing.
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
 
     @property
     def refresh_expires_at(self) -> datetime:
