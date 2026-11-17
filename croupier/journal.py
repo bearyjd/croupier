@@ -254,7 +254,7 @@ def auth_status(policy: Policy, now: datetime | None = None) -> AuthStatus:
     tokens = TokenState.load(policy.schwab_token_path)
     if tokens is None:
         return AuthStatus(False, None, False,
-                          "no Schwab tokens — EOD floor in use (DEGRADED)")
+                          "no Schwab tokens — run initial browser auth")
     days = tokens.days_until_reauth(now or datetime.now(UTC))
     if days <= 0:
         return AuthStatus(True, days, True,

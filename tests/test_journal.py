@@ -211,6 +211,16 @@ def test_missing_schwab_tokens_reported_without_a_nag(tmp_path, audit, ledger):
     assert "no Schwab tokens" in report.auth.detail
 
 
+def test_auth_line_never_claims_a_data_feed_state(tmp_path, audit, ledger):
+    """Regression: with no tokens the auth line said 'EOD floor in use
+    (DEGRADED)' while the router's real health was DEAD (no floor either), and
+    the journal printed both. Feed state comes only from the observed health."""
+    report = _build(tmp_path, audit, ledger, health=DataHealth.DEAD)
+    text = render(report)
+    assert "DEAD DATA" in text
+    assert "DEGRADED" not in text and "EOD floor in use" not in text
+
+
 def test_reauth_nag_inside_24h(tmp_path, audit, ledger):
     """Refresh tokens hard-expire at 7 days; nag inside the last 24h."""
     from croupier.data.schwab import TokenState
