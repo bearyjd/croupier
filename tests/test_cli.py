@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from croupier import cli
+from croupier.data import observed_health
 from croupier.data.base import DataHealth
 from croupier.ledger import Ledger
 
@@ -26,6 +27,9 @@ def workspace(tmp_path, monkeypatch):
 
 
 def _run(monkeypatch, capsys, argv, payload=None):
+    if argv[0] == "check" and not observed_health.OBSERVED_HEALTH_PATH.exists():
+        # `check` reads the health `mark` last observed; stand in for a prior mark.
+        observed_health.save(DataHealth.FRESH)
     if payload is not None:
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     code = cli.main(argv)
@@ -1303,3 +1307,26 @@ def test_row_under_the_intent_key_with_different_values_is_not_a_replay(
     code, out = _reconcile(monkeypatch, capsys, handle, qty="900", price="2.79")
     assert code == 1 and out["ledger"] is False and "inserted" not in out
     assert _ledger_qty(workspace) == [1000] and _no_reconcile_record(workspace)
+
+
+def test_check_ignores_caller_supplied_data_health(workspace, monkeypatch, capsys):
+    """The gate must consume the health `mark` observed, not the caller's claim."""
+    observed_health.save(DataHealth.DEAD)
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order(data_health="fresh"))
+    gate = next(d for d in verdict["decisions"] if d["gate"] == "data_health")
+    assert code == 1 and not verdict["approved"] and not gate["passed"]
+
+
+def test_check_with_no_prior_mark_fails_closed(workspace, monkeypatch, capsys):
+    """Never observed is DEAD, even if the caller asserts fresh."""
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_order(data_health="fresh"))))
+    code = cli.main(["check"])
+    verdict = json.loads(capsys.readouterr().out)
+    assert code == 1 and not verdict["approved"]
+
+
+def test_check_uses_observed_fresh_over_caller_dead(workspace, monkeypatch, capsys):
+    observed_health.save(DataHealth.FRESH)
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order(data_health="dead"))
+    gate = next(d for d in verdict["decisions"] if d["gate"] == "data_health")
+    assert gate["passed"]

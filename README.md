@@ -112,7 +112,7 @@ for real intents:
 | `is_etf` | lets an `etf_only` denylist entry pass |
 | `venue` | must equal `execution_venue` in policy (`robinhood`) |
 | `adv_shares` | average daily volume, for the thin-liquidity flag |
-| `data_health` | `fresh` \| `degraded` \| `dead` (from `croupier auth-status`) |
+| `data_health` | **ignored** — the gate uses the health `croupier mark` last observed (`dead` if never marked) |
 | `auto_spent_today` | AUTO-mode daily spend so far; ignored in CONFIRM |
 | `account` | Robinhood MCP snapshot: `total_value`, `cash`, `sleeve_cost_basis`, `position_cost_basis` |
 

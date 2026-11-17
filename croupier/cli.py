@@ -22,7 +22,6 @@ from pathlib import Path
 
 from croupier.audit import AuditLog, valid_approval_id
 from croupier.data import observed_health
-from croupier.data.base import DataHealth
 from croupier.data.factory import build_router
 from croupier.journal import JOURNAL_DIR
 from croupier.journal import build as build_journal
@@ -99,7 +98,8 @@ def cmd_check(payload: dict) -> int:
     verdict = AuditLog(AUDIT_PATH).check_and_log(
         intent, policy.config, snap,
         payload.get("auto_spent_today", 0.0),
-        DataHealth(payload.get("data_health", "fresh")),
+        # Never the caller's claim: the health `mark` actually observed.
+        observed_health.load(),
         calendar=policy.catalysts,
         held_qty=held_qty,
     )
