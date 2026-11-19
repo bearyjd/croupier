@@ -399,3 +399,34 @@ async def test_a_failing_audit_write_does_not_stop_later_sleeves(
                                   SleeveState.empty(), max_drawdown_pct=25.0,
                                   as_of=D2, audit=_ExplodingAudit())
     assert result.state.is_halted("alpha") and result.state.is_halted("beta")
+
+
+async def test_persists_halt_and_health_to_injected_paths_without_chdir(
+        led, fake_router, tmp_path, monkeypatch):
+    from croupier import policy
+    from croupier.data import observed_health
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)  # only to prove nothing lands in cwd
+    state_path = tmp_path / "custom" / "state.yaml"
+    health_path = tmp_path / "custom" / "health.json"
+    _fill(led, "a1", "buy", 1000, 2.80, D1)
+    await mark_to_market(led, fake_router({"ACME": 2.80}), SleeveState.empty(),
+                         max_drawdown_pct=25.0, as_of=D1,
+                         state_path=state_path, health_path=health_path)
+    result = await mark_to_market(led, fake_router({"ACME": 2.00}), SleeveState.empty(),
+                                  max_drawdown_pct=25.0, as_of=D2,
+                                  state_path=state_path, health_path=health_path)
+    assert result.state.is_halted(SLEEVE)
+    assert SleeveState.load(state_path).is_halted(SLEEVE)
+    import shutil
+    from pathlib import Path
+    pol_file = tmp_path / "policy.yaml"
+    shutil.copy(Path(__file__).parent.parent / "config" / "policy.example.yaml", pol_file)
+    pol = policy.load(state_path=state_path,
+                      policy_path=pol_file,
+                      catalyst_path=tmp_path / "none.yaml")
+    assert pol.state.is_halted(SLEEVE)
+    assert observed_health.load(health_path) == DataHealth.FRESH
+    assert not (cwd / "data").exists()
+

@@ -16,6 +16,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 
 from croupier.audit import AuditLog
 from croupier.data import observed_health
@@ -24,7 +25,7 @@ from croupier.data.router import DataRouter
 from croupier.drawdown import EquityPoint, advance
 from croupier.ledger import Ledger, Position
 from croupier.models import utcnow
-from croupier.state import Halt, SleeveState
+from croupier.state import STATE_PATH, Halt, SleeveState
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,8 @@ async def mark_to_market(
     as_of: date | None = None,
     audit: AuditLog | None = None,
     canary: str | None = CANARY_TICKER,
+    state_path: str | Path = STATE_PATH,
+    health_path: str | Path = observed_health.OBSERVED_HEALTH_PATH,
 ) -> MarkResult:
     """Mark all sleeves, advance their equity curves, halt on breach.
 
@@ -70,6 +73,9 @@ async def mark_to_market(
     made the *first* entry impossible without a human overriding data
     health, the opposite of what the observed-health rule is for. Pass
     ``None`` to disable (tests that assert the no-probe path).
+
+    ``state_path`` / ``health_path`` are where halts and observed health are
+    persisted; pass the same state path used for ``policy.load``.
     """
     day = as_of or utcnow().date()
     positions = ledger.positions()
@@ -107,7 +113,7 @@ async def mark_to_market(
                 next_state = next_state.with_halt(halt)
                 halted_now = True
                 # Safety state first, logging second.
-                next_state.save()
+                next_state.save(state_path)
                 pending_event = ("sleeve_halted", {
                     "sleeve": sleeve, "reason": halt.reason,
                     "market_value": market_value, "net_flow": net_flow})
@@ -140,7 +146,7 @@ async def mark_to_market(
                 halted_now = True
                 # Safety state first, logging second: a failing audit write
                 # must never leave a breached sleeve un-halted.
-                next_state.save()
+                next_state.save(state_path)
                 pending_event = ("sleeve_halted", {
                     "sleeve": sleeve, "reason": halt.reason,
                     "drawdown_pct": halt.drawdown_pct,
@@ -173,7 +179,7 @@ async def mark_to_market(
         # nothing probed, router.health() is still the router's constructed
         # default, and persisting it would smuggle the exact "unobserved but
         # reported anyway" bug this file exists to fix back in.
-        observed_health.save(health, observed_at=utcnow())
+        observed_health.save(health, health_path, observed_at=utcnow())
 
     return MarkResult(
         as_of=day, data_health=health,
