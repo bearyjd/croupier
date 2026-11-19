@@ -13,7 +13,6 @@
   "venue": "robinhood",
   "adv_shares": 850000,
   "data_health": "fresh",
-  "auto_spent_today": 0.0,
   "account": {
     "total_value": 100000.0,
     "cash": 50000.0,

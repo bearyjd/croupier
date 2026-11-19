@@ -11,7 +11,7 @@ import pytest
 from croupier import cli
 from croupier.data import observed_health
 from croupier.data.base import DataHealth
-from croupier.ledger import Ledger
+from croupier.ledger import Ledger, new_fill
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -1330,3 +1330,52 @@ def test_check_uses_observed_fresh_over_caller_dead(workspace, monkeypatch, caps
     code, verdict = _run(monkeypatch, capsys, ["check"], _order(data_health="dead"))
     gate = next(d for d in verdict["decisions"] if d["gate"] == "data_health")
     assert gate["passed"]
+
+
+# --- AUTO daily spend comes from the ledger, never the caller ---------------
+
+def _auto_policy(workspace):
+    p = workspace / "config" / "policy.yaml"
+    p.write_text(p.read_text().replace(
+        "    mode: confirm\n",
+        "    mode: auto\n    auto_order_max_usd: 3000\n    auto_daily_max_usd: 5000\n", 1))
+
+
+def _seed(workspace, *fills):
+    (workspace / "data").mkdir(exist_ok=True)
+    with Ledger(workspace / "data" / "ledger.db") as led:
+        for approval_id, side, qty in fills:
+            led.record_fill(new_fill(approval_id, "event_driven", "ACME", side, qty, 3.0))
+
+
+def _mode(verdict):
+    return next(d for d in verdict["decisions"] if d["gate"] == "mode")
+
+
+def test_auto_daily_cap_uses_ledger_not_caller_claim(workspace, monkeypatch, capsys):
+    _auto_policy(workspace)
+    _seed(workspace, ("b1", "buy", 1000.0))  # $3,000 bought today; +$2,800 > $5,000
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order(auto_spent_today=0.0))
+    assert not _mode(verdict)["passed"]
+    assert "AUTO daily cap exceeded" in _mode(verdict)["reason"]
+
+
+def test_auto_daily_cap_applies_when_payload_field_omitted(workspace, monkeypatch, capsys):
+    _auto_policy(workspace)
+    _seed(workspace, ("b1", "buy", 1000.0))
+    order = _order()
+    order.pop("auto_spent_today", None)
+    _, verdict = _run(monkeypatch, capsys, ["check"], order)
+    assert "AUTO daily cap exceeded" in _mode(verdict)["reason"]
+
+
+def test_sells_do_not_reduce_auto_daily_spend(workspace, monkeypatch, capsys):
+    _auto_policy(workspace)
+    _seed(workspace, ("b1", "buy", 1000.0), ("s1", "sell", 700.0))  # net $900, gross buys $3,000
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert "AUTO daily cap exceeded" in _mode(verdict)["reason"]
+
+
+def test_confirm_check_does_not_create_the_ledger(workspace, monkeypatch, capsys):
+    _run(monkeypatch, capsys, ["check"], _order(auto_spent_today=9999.0))
+    assert not (workspace / "data" / "ledger.db").exists()

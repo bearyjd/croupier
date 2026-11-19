@@ -189,6 +189,18 @@ class Ledger:
             if f.filled_at.date() == day
         )
 
+    def buys_on(self, sleeve: str, day: date) -> float:
+        """Gross buy notional filled in this sleeve on ``day`` (UTC); sells ignored.
+
+        The AUTO daily-spend measure: a sell must not free up headroom for
+        another buy, so this is deliberately not `net_flow_on`.
+        """
+        return sum(
+            f.notional
+            for f in self.fills(sleeve)
+            if f.side == "buy" and f.filled_at.date() == day
+        )
+
     def sleeves(self) -> list[str]:
         return [r["sleeve"] for r in
                 self._conn.execute("SELECT DISTINCT sleeve FROM fills ORDER BY sleeve")]

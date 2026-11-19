@@ -43,6 +43,8 @@ change means a new thesis, which means a new check with updated signal_refs.
   something in passing that isn't in a public filing. If a thesis can't be
   supported by citable public refs, it doesn't trade. Flag it and move on.
 - Never exceed the Agentic Account budget or rely on it as the only limit.
+- Do not track AUTO daily spend yourself: Croupier derives it from its ledger
+  and ignores any `auto_spent_today` you send.
 - HALTED sleeves are halted: no orders, including sells, without human
   instruction.
 
