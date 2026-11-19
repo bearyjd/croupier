@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Grepon Labs
 """The daily journal: what the operator reads before deciding anything."""
+from dataclasses import asdict
 from datetime import UTC, date, datetime
 
 import pytest
@@ -12,7 +13,7 @@ from croupier.data.base import DataHealth
 from croupier.gates.pipeline import PolicyConfig, SleeveConfig
 from croupier.journal_render import render
 from croupier.ledger import Fill, Ledger
-from croupier.models import Mode
+from croupier.models import AccountSnapshot, Mode, OrderIntent
 from croupier.policy import Policy
 from croupier.state import Halt, SleeveState
 
@@ -43,11 +44,16 @@ def _policy(tmp_path, state=None, mode=Mode.CONFIRM, calendar=None) -> Policy:
                   catalysts=calendar or CatalystCalendar.empty())
 
 
+def _intent() -> OrderIntent:
+    return OrderIntent(sleeve="event_driven", ticker="ACME", side="buy", qty=1000,
+                       limit_price=2.80, signal_refs=("8-K:0001",),
+                       thesis="catalyst entry")
+
+
 def _check_record(approval_id, approved=True, requires_confirm=True, total_value=100_000.0):
     return {
         "ts": "2026-08-28T10:00:00+00:00", "kind": "check",
-        "intent": {"sleeve": "event_driven", "ticker": "ACME", "side": "buy",
-                   "qty": 1000, "limit_price": 2.80, "thesis": "catalyst entry"},
+        "intent": asdict(_intent()),
         "snapshot": {"total_value": total_value, "cash": 50_000.0},
         "approved": approved, "approval_id": approval_id,
         "requires_confirm": requires_confirm,
@@ -362,3 +368,40 @@ def test_position_ticker_auth_detail_and_snapshot_ts_are_escaped(tmp_path, audit
     text = render(report)
     assert "AC<b>ME" not in text and "<i>ts" not in text
     assert "\n## FORGED" not in text and "<u>" not in text
+
+
+# --- round trip through the real writer (AuditLog.check_and_log) ---
+
+# The intent keys journal.py and cli.py read back out of a check record.
+_READ_INTENT_KEYS = {"sleeve", "ticker", "side", "qty", "limit_price", "thesis"}
+
+
+def test_journal_reads_only_fields_the_writer_persists():
+    assert _READ_INTENT_KEYS <= set(asdict(_intent()))
+
+
+def test_pending_confirms_round_trips_a_real_check(tmp_path, audit):
+    cfg = _policy(tmp_path).config
+    verdict = audit.check_and_log(_intent(), cfg, AccountSnapshot(100_000.0, 50_000.0))
+    assert verdict.approved and verdict.requires_confirm
+    (pending,) = journal.pending_confirms(audit)
+    assert pending.approval_id == verdict.approval_id
+    assert (pending.sleeve, pending.ticker, pending.side) == ("event_driven", "ACME", "buy")
+    assert (pending.qty, pending.limit_price) == (1000, 2.80)
+    assert pending.thesis == "catalyst entry"
+
+
+def test_latest_account_value_round_trips_a_real_check(tmp_path, audit):
+    cfg = _policy(tmp_path).config
+    audit.check_and_log(_intent(), cfg, AccountSnapshot(123_456.0, 50_000.0))
+    value, ts = journal.latest_account_value(audit)
+    assert value == 123_456.0
+    assert ts is not None
+
+
+def test_cli_fill_reader_finds_a_real_approval(tmp_path, audit):
+    cfg = _policy(tmp_path).config
+    verdict = audit.check_and_log(_intent(), cfg, AccountSnapshot(100_000.0, 50_000.0))
+    intent = audit.find_approval(verdict.approval_id)["intent"]
+    assert _READ_INTENT_KEYS <= set(intent)
+    assert intent["ticker"] == "ACME" and intent["side"] == "buy"
