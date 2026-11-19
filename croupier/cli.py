@@ -29,7 +29,7 @@ from croupier.journal import write as write_journal
 from croupier.journal_render import render as render_journal
 from croupier.ledger import LEDGER_PATH, Ledger, LedgerConflict, new_fill
 from croupier.marking import mark_to_market
-from croupier.models import AccountSnapshot, OrderIntent, require_finite
+from croupier.models import AccountSnapshot, Mode, OrderIntent, require_finite
 from croupier.policy import load as load_full_policy
 
 AUDIT_PATH = Path("data/audit.jsonl")
@@ -95,9 +95,21 @@ def cmd_check(payload: dict) -> int:
             held_qty = next((p.qty for p in ledger.positions()
                              if p.sleeve == intent.sleeve
                              and p.ticker == intent.ticker.upper()), 0.0)
+    # AUTO daily spend is likewise derived from the ledger (gross filled buys
+    # today, UTC), never the caller's claim. Approved-but-unfilled orders are
+    # not counted. Opened for AUTO sleeves only, so CONFIRM checks stay
+    # side-effect free.
+    if "auto_spent_today" in payload:
+        print("warning: payload auto_spent_today is ignored; spend is read "
+              "from the ledger", file=sys.stderr)
+    auto_spent_today = 0.0
+    sleeve_cfg = policy.config.sleeves.get(intent.sleeve)
+    if sleeve_cfg is not None and sleeve_cfg.mode == Mode.AUTO:
+        with Ledger(LEDGER_PATH) as ledger:
+            auto_spent_today = ledger.buys_on(intent.sleeve, datetime.now(UTC).date())
     verdict = AuditLog(AUDIT_PATH).check_and_log(
         intent, policy.config, snap,
-        payload.get("auto_spent_today", 0.0),
+        auto_spent_today,
         # Never the caller's claim: the health `mark` actually observed.
         observed_health.load(),
         calendar=policy.catalysts,

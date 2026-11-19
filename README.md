@@ -113,7 +113,7 @@ for real intents:
 | `venue` | must equal `execution_venue` in policy (`robinhood`) |
 | `adv_shares` | average daily volume, for the thin-liquidity flag |
 | `data_health` | **ignored** — the gate uses the health `croupier mark` last observed (`dead` if never marked) |
-| `auto_spent_today` | AUTO-mode daily spend so far; ignored in CONFIRM |
+| `auto_spent_today` | **ignored** (warns on stderr) — AUTO daily spend is the sleeve's gross filled buys today (UTC) in the ledger; sells do not reduce it, unfilled approvals are not counted |
 | `account` | Robinhood MCP snapshot: `total_value`, `cash`, `sleeve_cost_basis`, `position_cost_basis` |
 
 Every check — approved or not — appends a record to `data/audit.jsonl`
