@@ -210,8 +210,7 @@ def _mode_gate(intent: OrderIntent, cfg: PolicyConfig, auto_spent_today: float) 
         return GateDecision(
             "mode", False,
             f"AUTO order ${intent.notional:,.0f} > cap ${sc.auto_order_max_usd:,.0f}")
-    # Daily cap is a buy-spend cap; exits must never be blocked by it.
-    if intent.side == "buy" and auto_spent_today + intent.notional > sc.auto_daily_max_usd:
+    if auto_spent_today + intent.notional > sc.auto_daily_max_usd:
         return GateDecision("mode", False, "AUTO daily cap exceeded")
     return GateDecision("mode", True, "AUTO within caps")
 
