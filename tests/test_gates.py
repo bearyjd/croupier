@@ -88,6 +88,19 @@ def test_auto_mode_caps():
     assert not check(small, cfg, _snap(), auto_spent_today=800.0).approved  # daily cap
 
 
+def test_auto_exit_sell_not_blocked_by_daily_buy_cap():
+    cfg = _cfg(sleeves={"event_driven": SleeveConfig(
+        "event_driven", 10, 3, mode=Mode.AUTO,
+        auto_order_max_usd=5000, auto_daily_max_usd=5000)})
+    sell = _intent(side="sell")  # $2,800 full exit
+    v = check(sell, cfg, _snap(), auto_spent_today=3000.0, held_qty=1000)
+    assert v.approved
+    buy = check(_intent(), cfg, _snap(), auto_spent_today=3000.0)
+    assert not buy.approved  # buys still hit the daily cap
+    big = _intent(side="sell", limit_price=6.0)  # $6,000 > per-order cap
+    assert not check(big, cfg, _snap(), auto_spent_today=0.0, held_qty=1000).approved
+
+
 # --- PRP-002: venue + data health ---
 
 
