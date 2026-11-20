@@ -9,10 +9,20 @@ import json
 import math
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
+from croupier.audit_schema import (
+    AckFillRecord,
+    CheckRecord,
+    DeclineRecord,
+    EventRecord,
+    FillRecord,
+    Kind,
+    ReconcileRecord,
+)
 from croupier.catalysts import CatalystCalendar
 from croupier.data.base import DataHealth
 from croupier.gates.pipeline import PolicyConfig, check
@@ -47,7 +57,7 @@ def valid_approval_id(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _safe_clean(record: dict) -> dict:
+def _safe_clean(record: Mapping[str, object]) -> dict:
     """_clean, but a value nested past the recursion limit is summarised
     rather than raised: the record must still be written."""
     try:
@@ -75,9 +85,9 @@ class AuditLog:
                       held_qty: float | None = None) -> Verdict:
         verdict = check(intent, cfg, snap, auto_spent_today, data_health,
                         calendar=calendar, today=today, held_qty=held_qty)
-        record = {
+        record: CheckRecord = {
             "ts": utcnow().isoformat(),
-            "kind": "check",
+            "kind": Kind.CHECK,
             "intent": asdict(intent),
             "snapshot": {"total_value": snap.total_value, "cash": snap.cash,
                          "sleeve_cost_basis": dict(snap.sleeve_cost_basis),
@@ -103,20 +113,22 @@ class AuditLog:
         field. Every fill record also gets a unique ``fill_id``: the handle
         that acknowledges it when its approval_id cannot (null, non-string).
         """
-        self._append({"ts": utcnow().isoformat(), "kind": "fill",
+        record: FillRecord = {"ts": utcnow().isoformat(), "kind": Kind.FILL,
                       "fill_id": uuid.uuid4().hex[:12],
                       "approval_id": approval_id, "sleeve": sleeve,
                       "ticker": ticker, "side": side, "qty": qty,
                       "price": price, "orphan": orphan,
-                      **{flag: True for flag in flags}})
+                      **{flag: True for flag in flags}}
+        self._append(record)
 
     def log_ack_fill(self, approval_id: str | None, reason: str,
                      handle: str | None = None) -> None:
         """Record the operator's acknowledgement of a flagged/orphan fill,
         by approval_id or, for a record with no usable id, by its handle."""
-        self._append({"ts": utcnow().isoformat(), "kind": "ack_fill",
+        record: AckFillRecord = {"ts": utcnow().isoformat(), "kind": Kind.ACK_FILL,
                       "approval_id": approval_id, "handle": handle,
-                      "reason": reason})
+                      "reason": reason}
+        self._append(record)
 
     def log_reconcile(self, fill_id: str, approval_id: str, sleeve: str,
                       ticker: str, side: str, qty: float, price: float,
@@ -126,12 +138,13 @@ class AuditLog:
         """Record the operator's confirmed values for a refused/orphan fill,
         linked to that fill record by ``fill_id``. Written after the ledger
         insert; it also resolves the fill's Needs-action entry."""
-        self._append({"ts": utcnow().isoformat(), "kind": "reconcile",
+        record: ReconcileRecord = {"ts": utcnow().isoformat(), "kind": Kind.RECONCILE,
                       "fill_id": fill_id, "approval_id": approval_id,
                       "sleeve": sleeve, "ticker": ticker, "side": side,
                       "qty": qty, "price": price, "reason": reason,
                       "reported_qty": reported_qty, "reported_price": reported_price,
-                      "force": force, "inserted": inserted})
+                      "force": force, "inserted": inserted}
+        self._append(record)
 
     def log_decline(self, approval_id: str, reason: str,
                     known: bool = True) -> None:
@@ -145,14 +158,16 @@ class AuditLog:
         log has never seen; it is still written, for the same reason an
         orphan fill is.
         """
-        self._append({"ts": utcnow().isoformat(), "kind": "decline",
+        record: DeclineRecord = {"ts": utcnow().isoformat(), "kind": Kind.DECLINE,
                       "approval_id": approval_id, "reason": reason,
-                      "known": known})
+                      "known": known}
+        self._append(record)
 
     def log_event(self, event: str, detail: dict) -> None:
         """Record a non-order policy event (halts, data-health transitions)."""
-        self._append({"ts": utcnow().isoformat(), "kind": "event",
-                      "event": event, **detail})
+        record: EventRecord = {"ts": utcnow().isoformat(), "kind": Kind.EVENT,
+                      "event": event, **detail}
+        self._append(record)
 
     def records(self) -> list[dict]:
         """Every well-formed record, oldest first. A corrupt line is skipped,
@@ -189,12 +204,12 @@ class AuditLog:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (rec.get("kind") == "check" and rec.get("approved")
+                if (rec.get("kind") == Kind.CHECK and rec.get("approved")
                         and rec.get("approval_id") == approval_id):
                     found = rec
         return found
 
-    def _append(self, record: dict) -> None:
+    def _append(self, record: Mapping[str, object]) -> None:
         with open(self.path, "a") as f:
             f.write(json.dumps(_safe_clean(record), default=str, allow_nan=False) + "\n")
             f.flush()

@@ -18,6 +18,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from croupier.audit import AuditLog
+from croupier.audit_schema import Kind
 from croupier.ledger import Ledger, Position
 from croupier.models import parse_ts
 
@@ -110,7 +111,7 @@ def reconcile_snapshot(record: Mapping | None, positions: Iterable[Position],
 def latest_check_record(records: Iterable[Mapping]) -> Mapping | None:
     """The newest ``check`` record that carries a snapshot."""
     for rec in reversed(list(records)):
-        if rec.get("kind") == "check" and isinstance(rec.get("snapshot"), Mapping):
+        if rec.get("kind") == Kind.CHECK and isinstance(rec.get("snapshot"), Mapping):
             return rec
     return None
 

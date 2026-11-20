@@ -17,6 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from croupier.audit import AuditLog, valid_approval_id
+from croupier.audit_schema import Kind
 from croupier.catalysts import CatalystEvent
 from croupier.data.base import DataHealth
 from croupier.gates.pipeline import SleeveConfig
@@ -110,7 +111,7 @@ def needs_action(audit: AuditLog) -> tuple[FillIssue, ...]:
     for idx, rec in enumerate(audit.records()):
         kind = rec.get("kind")
         match_id = valid_approval_id(rec.get("approval_id"))
-        if kind in ("ack_fill", "reconcile"):
+        if kind in (Kind.ACK_FILL, Kind.RECONCILE):
             handle = rec.get("handle") or rec.get("fill_id")
             if handle:
                 open_issues = [i for i in open_issues if i.handle != handle]
@@ -118,13 +119,13 @@ def needs_action(audit: AuditLog) -> tuple[FillIssue, ...]:
                 open_issues = [i for i in open_issues if i.match_id != match_id]
             continue
         problems = ()
-        if kind == "fill":
+        if kind == Kind.FILL:
             problems = tuple(text for key, text in _PROBLEMS if rec.get(key))
             if match_id is None and not rec.get("bad_approval_id"):
                 problems += (_MALFORMED,)
         elif match_id is None and (
-                kind == "decline"
-                or (kind == "check" and rec.get("approved"))):
+                kind == Kind.DECLINE
+                or (kind == Kind.CHECK and rec.get("approved"))):
             problems = (_MALFORMED,)
         if problems:
             open_issues.append(FillIssue(
@@ -158,7 +159,7 @@ def forced_reconciles(audit: AuditLog, now: datetime) -> tuple[ForcedReconcile, 
     beyond the audit log."""
     out = []
     for rec in audit.records():
-        if rec.get("kind") != "reconcile" or not rec.get("force"):
+        if rec.get("kind") != Kind.RECONCILE or not rec.get("force"):
             continue
         ts = parse_ts(rec.get("ts"))   # naive -> UTC; malformed -> skipped
         if ts is None:
@@ -192,7 +193,7 @@ class JournalReport:
 def latest_account_value(audit: AuditLog) -> tuple[float | None, str | None]:
     for rec in reversed(audit.records()):
         snap = rec.get("snapshot") or {}
-        if rec.get("kind") == "check" and snap.get("total_value") is not None:
+        if rec.get("kind") == Kind.CHECK and snap.get("total_value") is not None:
             return float(snap["total_value"]), rec.get("ts")
     return None, None
 
@@ -222,13 +223,13 @@ def pending_confirms(audit: AuditLog) -> tuple[PendingConfirm, ...]:
     declined: set[str] = set()
     for rec in audit.records():
         aid = valid_approval_id(rec.get("approval_id"))
-        if rec.get("kind") == "check" and rec.get("approved") and rec.get("requires_confirm"):
+        if rec.get("kind") == Kind.CHECK and rec.get("approved") and rec.get("requires_confirm"):
             if aid:
                 approved[aid] = rec
-        elif (rec.get("kind") == "fill"
+        elif (rec.get("kind") == Kind.FILL
               and not any(rec.get(k) for k, _ in _PROBLEMS)):
             fills.append(rec)
-        elif rec.get("kind") in ("decline", "ack_fill", "reconcile"):
+        elif rec.get("kind") in (Kind.DECLINE, Kind.ACK_FILL, Kind.RECONCILE):
             # an acknowledgement is the operator saying they reconciled it
             if aid:
                 declined.add(aid)
