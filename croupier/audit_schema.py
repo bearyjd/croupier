@@ -21,7 +21,7 @@ class Kind:
     EVENT: Final = "event"
 
 
-class CheckRecord(TypedDict):
+class CheckRecord(TypedDict, total=False):
     ts: str
     kind: str
     intent: dict

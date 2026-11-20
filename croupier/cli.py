@@ -68,36 +68,53 @@ def _reject_nonfinite(literal: str) -> float:
     raise ValueError(f"non-finite number {literal} is not accepted")
 
 
-def _ledger_backed_snapshot(snap: AccountSnapshot, intent: OrderIntent) -> AccountSnapshot:
-    """The gate snapshot with cost bases never below the ledger's own.
-
-    The agent's reported basis feeds the budget and position gates, so an
-    understated figure would wave through an oversized buy. Take the larger of
-    reported and ledger, and warn when the agent understated. Does not create
-    the ledger file if there is none."""
-    if not LEDGER_PATH.exists():
-        return snap
-    by_sleeve: dict[str, float] = {}
-    by_ticker: dict[str, float] = {}
+def _ledger_cost_basis(intent: OrderIntent) -> tuple[dict[str, float], dict[str, float]]:
+    """(sleeve cost basis, per-ticker cost basis) for the buy gates, from the
+    ledger. Sells skip both gates, and a missing ledger file is not created."""
+    if intent.side != "buy" or not LEDGER_PATH.exists():
+        return {}, {}
+    ticker = intent.ticker.upper()
     with Ledger(LEDGER_PATH) as ledger:
-        for p in ledger.positions():
-            by_sleeve[p.sleeve] = by_sleeve.get(p.sleeve, 0.0) + p.cost_basis
-            by_ticker[p.ticker.upper()] = by_ticker.get(p.ticker.upper(), 0.0) + p.cost_basis
-    sleeve = dict(snap.sleeve_cost_basis)
-    ticker: dict[str, float] = {}
-    for k, v in snap.position_cost_basis.items():
-        ticker[k.upper()] = ticker.get(k.upper(), 0.0) + v
-    for label, reported, ledger_vals, key in (
-            ("sleeve_cost_basis", sleeve, by_sleeve, intent.sleeve),
-            ("position_cost_basis", ticker, by_ticker, intent.ticker.upper())):
-        led = ledger_vals.get(key, 0.0)
-        if led > reported.get(key, 0.0) + 1e-9:
-            print(f"warning: {label}[{key}] reported {reported.get(key, 0.0):,.2f} "
-                  f"is below the ledger's {led:,.2f}; using the ledger",
-                  file=sys.stderr)
-            reported[key] = led
-    return AccountSnapshot(total_value=snap.total_value, cash=snap.cash,
-                           sleeve_cost_basis=sleeve, position_cost_basis=ticker)
+        positions = ledger.positions()
+    sleeve = sum(p.cost_basis for p in positions if p.sleeve == intent.sleeve)
+    # Account-wide for the ticker: the cap bounds exposure to one name.
+    held = sum(p.cost_basis for p in positions if p.ticker == ticker)
+    return {intent.sleeve: sleeve}, {ticker: held}
+
+
+_NOT_IN_LEDGER_FLAGS = ("refused", "implausible", "bad_approval_id")
+
+
+def _landed_ledger_keys(records: list[dict]) -> set[str]:
+    """Ledger keys of the fills the audit log says reached the ledger. A fill
+    is audited only after the ledger write succeeds, and the ledger is
+    append-only, so every one of these must still be there."""
+    intent_keys = {r.get("fill_id"): r.get("ledger_key") for r in records
+                   if r.get("kind") == Kind.EVENT and r.get("event") == "reconcile_intent"}
+    keys: set[str] = set()
+    for r in records:
+        if (r.get("kind") == Kind.FILL and not r.get("orphan")
+                and not any(r.get(f) for f in _NOT_IN_LEDGER_FLAGS)):
+            keys.add(r.get("approval_id"))
+        elif r.get("kind") == Kind.RECONCILE:
+            # Operator reconcile: the row sits under the key its intent chose.
+            keys.add(intent_keys.get(r.get("fill_id")))
+    return {k for k in keys if isinstance(k, str)}
+
+
+def _ledger_missing_fills() -> int:
+    """How many audit-recorded fills are absent from the ledger (missing file,
+    zero-byte, restored from an older backup, rows deleted). Cost basis comes
+    from the ledger alone, so any such gap makes it untrustworthy. A fresh
+    install has no recorded fills and gets 0. Residual: blind if the audit
+    log is itself corrupted or deleted along with the ledger."""
+    landed = _landed_ledger_keys(AuditLog(AUDIT_PATH).records())
+    if not landed:
+        return 0
+    if not LEDGER_PATH.exists():
+        return len(landed)
+    with Ledger(LEDGER_PATH) as ledger:
+        return len(landed - {f.approval_id for f in ledger.fills()})
 
 
 def cmd_check(payload: dict) -> int:
@@ -109,17 +126,42 @@ def cmd_check(payload: dict) -> int:
         venue=payload.get("venue", "robinhood"),
         adv_shares=payload.get("adv_shares"),
     )
+    # Cost basis feeds the budget and position gates, so it comes from the
+    # ledger, never the caller: an agent reporting an empty basis would
+    # otherwise see every buy pass. total_value and cash remain caller-supplied
+    # (broker data Croupier cannot derive; see README "account").
+    account = payload["account"]
+    for key in ("sleeve_cost_basis", "position_cost_basis"):
+        if key in account:
+            print(f"warning: payload account.{key} is ignored; cost basis is "
+                  "read from the ledger", file=sys.stderr)
+    missing = _ledger_missing_fills() if intent.side == "buy" else 0
+    if missing:
+        reason = (f"{missing} recorded fill(s) are missing from the ledger "
+                  "(deleted, truncated or restored from an older backup): cost "
+                  "basis cannot be trusted; restore the current data/ledger.db")
+        AuditLog(AUDIT_PATH).log_event("ledger_history_lost", {
+            "sleeve": intent.sleeve, "ticker": intent.ticker, "missing": missing})
+        _emit({"approved": False, "approval_id": None, "requires_confirm": False,
+               "decisions": [{"gate": "ledger_integrity", "passed": False,
+                              "reason": reason}]})
+        return 1
+    sleeve_cost_basis, position_cost_basis = _ledger_cost_basis(intent)
+    # The caller's claim is kept for reconciliation (#32), never gated on.
+    reported = ({k: account.get(k, {}) for k in
+                 ("sleeve_cost_basis", "position_cost_basis")}
+                if any(k in account for k in
+                       ("sleeve_cost_basis", "position_cost_basis")) else None)
     snap = AccountSnapshot(
-        total_value=payload["account"]["total_value"],
-        cash=payload["account"]["cash"],
-        sleeve_cost_basis=payload["account"].get("sleeve_cost_basis", {}),
-        position_cost_basis=payload["account"].get("position_cost_basis", {}),
+        total_value=account["total_value"],
+        cash=account["cash"],
+        sleeve_cost_basis=sleeve_cost_basis,
+        position_cost_basis=position_cost_basis,
     )
     policy = load_full_policy()
     if payload.get("is_etf") and intent.ticker.upper() not in policy.config.etf_tickers:
         print("warning: payload is_etf is ignored; ETF status comes from "
               "policy etf_tickers", file=sys.stderr)
-    snap = _ledger_backed_snapshot(snap, intent)
     # Held quantity comes from Croupier's own ledger, never from the agent's
     # snapshot: the whole point of the holdings gate is to catch an agent
     # that has miscounted its position, so its own count cannot be the
@@ -151,6 +193,7 @@ def cmd_check(payload: dict) -> int:
         observed_health.load(),
         calendar=policy.catalysts,
         held_qty=held_qty,
+        reported_cost_basis=reported,
     )
     _emit({
         "approved": verdict.approved,

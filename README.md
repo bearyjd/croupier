@@ -114,7 +114,7 @@ for real intents:
 | `adv_shares` | average daily volume, for the thin-liquidity flag |
 | `data_health` | **ignored** — the gate uses the health `croupier mark` last observed (`dead` if never marked) |
 | `auto_spent_today` | **ignored** (warns on stderr) — AUTO daily spend is the sleeve's gross filled buys today (UTC) in the ledger; sells do not reduce it, unfilled approvals are not counted |
-| `account` | Robinhood MCP snapshot: `total_value`, `cash`, `sleeve_cost_basis`, `position_cost_basis` (cost bases are raised to the ledger's own figures when understated) |
+| `account` | Robinhood MCP snapshot: `total_value`, `cash`. `sleeve_cost_basis` / `position_cost_basis` are **ignored** (warns on stderr): both are derived from the ledger only (a larger reported figure is not kept either). The reported figures are still written to the audit record as `reported_cost_basis`, and the journal's snapshot-vs-ledger reconciliation (#32) compares them to the ledger's cost basis; it checks cost basis only, not `total_value` or `cash`. A buy is blocked (`ledger_integrity`) when any fill the audit log records as landed (including operator reconciles) is missing from the ledger: deleted, truncated, zero-byte or restored from an older backup. A restore holding every recorded fill passes; a fresh install is unaffected; sells are left to the holdings gate. Residual risk: this guard reads `audit.jsonl`, so it is blind if fill lines there are corrupted (unparseable lines are skipped) or the audit log is deleted together with the ledger; both need write access to the data dir Residual trust: `total_value` and `cash` are caller-supplied broker data; a forged `total_value` inflates the budget and position ceilings, and nothing cross-checks it |
 
 Every check — approved or not — appends a record to `data/audit.jsonl`
 and fsyncs it *before* the verdict is returned. No log write, no approval.
@@ -140,8 +140,8 @@ the response carries `warnings`, the audit record carries `overfill: true` /
 `fill_after_decline: true`, and the command exits `1`. It is not refused
 because the trade really happened: a ledger that understated holdings would
 make sells fail closed, keep `mark` from marking the position or tripping the
-drawdown halt, and misstate the journal's sleeve lines. (Buy caps use the
-agent-supplied `sleeve_cost_basis` snapshot in `check`, not the ledger.)
+drawdown halt, and misstate the journal's sleeve lines. (Buy caps in `check` use the
+ledger's cost basis, so a fill recorded here counts against them.)
 An identical replay of a recorded fill is a harmless repeat (`"new": false`,
 `"replay": true`, no second audit record, same exit code).
 A buy filled more than 1% above its approved limit (or a sell more than 1%
