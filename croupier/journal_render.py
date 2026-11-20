@@ -58,6 +58,8 @@ def render(report: JournalReport) -> str:
         out += ["_none_"]
     out += [""]
 
+    out += _recon_section(report)
+
     out += [f"## Needs action ({len(report.needs_action)})", ""]
     if report.needs_action:
         out += ["Fills that need reconciling. Stop trading on these tickers until "
@@ -98,6 +100,25 @@ def render(report: JournalReport) -> str:
     out += [""]
 
     return "\n".join(out)
+
+
+def _recon_section(report: JournalReport) -> list[str]:
+    r = report.recon
+    out = ["## Snapshot vs ledger", ""]
+    if r is None or not r.checked:
+        out += ["_not checked_ — no snapshot with cost-basis fields yet"]
+    elif r.ok:
+        out += [f"_matches_ — agent snapshot at {_md(r.snapshot_ts)} agrees with the ledger"]
+    else:
+        out += [f"Agent snapshot at {_md(r.snapshot_ts)} disagrees with the ledger. "
+                "A fill reported to the broker but not to Croupier (or the reverse) "
+                "leaves cost-basis caps and marking wrong.", ""]
+        out += [f"- {d.scope} {_code(d.key)}: ledger {_usd(d.ledger)}, snapshot "
+                f"{'absent' if d.reported is None else _usd(d.reported)}"
+                for d in r.discrepancies]
+        out += [f"- ticker {_code(t)}: in the ledger only" for t in r.ledger_only]
+        out += [f"- ticker {_code(t)}: in the snapshot only" for t in r.reported_only]
+    return out + [""]
 
 
 def _sleeve_block(s: SleeveLine) -> str:

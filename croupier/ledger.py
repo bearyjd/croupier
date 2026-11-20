@@ -177,9 +177,13 @@ class Ledger:
 
     # --- derived state -----------------------------------------------------
 
-    def positions(self) -> list[Position]:
-        """Open positions per (sleeve, ticker), weighted-average cost basis."""
-        return _positions_from(self.fills())
+    def positions(self, as_of: datetime | None = None) -> list[Position]:
+        """Open positions per (sleeve, ticker), weighted-average cost basis.
+        With ``as_of``, only fills at or before that instant count."""
+        fills = self.fills()
+        if as_of is not None:
+            fills = [f for f in fills if f.filled_at <= as_of]
+        return _positions_from(fills)
 
     def net_flow_on(self, sleeve: str, day: date) -> float:
         """Cash deployed into this sleeve's positions on ``day`` (buys - sells)."""

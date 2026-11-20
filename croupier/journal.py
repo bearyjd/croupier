@@ -23,6 +23,7 @@ from croupier.gates.pipeline import SleeveConfig
 from croupier.ledger import Ledger, Position
 from croupier.models import parse_ts
 from croupier.policy import Policy
+from croupier.recon import ReconReport, reconcile_ledger
 from croupier.state import Halt
 
 JOURNAL_DIR = Path("data/journal")
@@ -185,6 +186,7 @@ class JournalReport:
     forced: tuple[ForcedReconcile, ...] = ()
     freezes: tuple[CatalystEvent, ...] = ()   # active catalyst freezes today
     freeze_trading_days: int = 0
+    recon: ReconReport | None = None         # snapshot vs ledger cost basis
 
 
 def latest_account_value(audit: AuditLog) -> tuple[float | None, str | None]:
@@ -269,6 +271,7 @@ def build(policy: Policy, ledger: Ledger, audit: AuditLog,
     day = as_of or datetime.now(UTC).date()
     account_value, snapshot_ts = latest_account_value(audit)
     positions = ledger.positions()
+    recon = reconcile_ledger(audit, ledger)
 
     lines = []
     for name, sc in sorted(policy.config.sleeves.items()):
@@ -295,6 +298,7 @@ def build(policy: Policy, ledger: Ledger, audit: AuditLog,
         halts=tuple(sorted(policy.state.halts.values(), key=lambda h: h.sleeve)),
         freezes=policy.catalysts.freezes_on(day),
         freeze_trading_days=policy.catalysts.freeze_trading_days,
+        recon=recon,
     )
 
 

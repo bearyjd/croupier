@@ -594,7 +594,24 @@ def cmd_journal() -> int:
     # Non-zero when the operator has something to act on, so a cron wrapper
     # can push on the exit code alone.
     return 1 if (report.pending or report.needs_action or report.halts
-                      or report.auth.nag) else 0
+                      or report.auth.nag
+                      or (report.recon is not None and not report.recon.ok)) else 0
+
+
+def cmd_recon() -> int:
+    """Compare the latest agent snapshot's cost basis with the ledger.
+    Exit 1 on any discrepancy; 0 when matching or nothing to check yet."""
+    from croupier.recon import reconcile_ledger
+    audit = AuditLog(AUDIT_PATH)
+    with Ledger(LEDGER_PATH) as ledger:
+        report = reconcile_ledger(audit, ledger)
+    _emit({"checked": report.checked, "ok": report.ok,
+           "snapshot_ts": report.snapshot_ts,
+           "discrepancies": [{"scope": d.scope, "key": d.key, "ledger": d.ledger,
+                              "reported": d.reported} for d in report.discrepancies],
+           "ledger_only": list(report.ledger_only),
+           "reported_only": list(report.reported_only)})
+    return 0 if report.ok else 1
 
 
 def cmd_auth_status() -> int:
@@ -634,6 +651,7 @@ def main(argv: list[str] | None = None) -> int:
                      help="lift the plausibility bands (never the finite checks)")
     sub.add_parser("mark", help="daily mark-to-market + drawdown halt")
     sub.add_parser("journal", help="render today's operator journal")
+    sub.add_parser("recon", help="latest snapshot cost basis vs the ledger")
     sub.add_parser("auth-status", help="Schwab data-feed token health")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -646,6 +664,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_mark()
     if args.cmd == "journal":
         return cmd_journal()
+    if args.cmd == "recon":
+        return cmd_recon()
     if args.cmd == "auth-status":
         return cmd_auth_status()
 
