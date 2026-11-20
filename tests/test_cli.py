@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from croupier import cli
+from croupier.audit import AuditLog
 from croupier.data import observed_health
 from croupier.data.base import DataHealth
 from croupier.ledger import Ledger, new_fill
@@ -1379,3 +1380,29 @@ def test_sells_do_not_reduce_auto_daily_spend(workspace, monkeypatch, capsys):
 def test_confirm_check_does_not_create_the_ledger(workspace, monkeypatch, capsys):
     _run(monkeypatch, capsys, ["check"], _order(auto_spent_today=9999.0))
     assert not (workspace / "data" / "ledger.db").exists()
+
+
+def _seed_snapshot(workspace, basis):
+    """A logged check whose snapshot reports `basis` for ACME, no fills."""
+    AuditLog(workspace / "data" / "audit.jsonl")._append({
+        "ts": "2026-08-28T10:00:00+00:00", "kind": "check",
+        "snapshot": {"total_value": 100_000.0, "cash": 1.0,
+                     "sleeve_cost_basis": {"event_driven": basis},
+                     "position_cost_basis": {"ACME": basis}}})
+
+
+def test_recon_command_exits_nonzero_on_snapshot_ledger_mismatch(
+        workspace, monkeypatch, capsys):
+    code, out = _run(monkeypatch, capsys, ["recon"])
+    assert code == 0 and out["checked"] is False     # no snapshot yet
+    _seed_snapshot(workspace, 5000.0)
+    code, out = _run(monkeypatch, capsys, ["recon"])
+    assert code == 1 and out["ok"] is False
+    assert out["reported_only"] == ["ACME"]
+
+
+def test_journal_exit_code_reflects_snapshot_ledger_mismatch(
+        workspace, monkeypatch, capsys):
+    _seed_snapshot(workspace, 5000.0)
+    assert cli.main(["journal"]) == 1
+    assert "Snapshot vs ledger" in capsys.readouterr().out
