@@ -85,22 +85,36 @@ def _ledger_cost_basis(intent: OrderIntent) -> tuple[dict[str, float], dict[str,
 _NOT_IN_LEDGER_FLAGS = ("refused", "implausible", "bad_approval_id")
 
 
-def _ledger_history_lost() -> bool:
-    """True when the audit log holds fills that reached the ledger but the
-    ledger has none (file missing, zero-byte, or emptied). Zero deployed
-    capital would then pass every buy, so the caller blocks buys. A fresh
-    install has no such fills and is unaffected."""
-    landed = any(
-        (r.get("kind") == Kind.FILL and not r.get("orphan")
-         and not any(r.get(f) for f in _NOT_IN_LEDGER_FLAGS))
-        or (r.get("kind") == Kind.RECONCILE and r.get("inserted"))
-        for r in AuditLog(AUDIT_PATH).records())
+def _landed_ledger_keys(records: list[dict]) -> set[str]:
+    """Ledger keys of the fills the audit log says reached the ledger. A fill
+    is audited only after the ledger write succeeds, and the ledger is
+    append-only, so every one of these must still be there."""
+    intent_keys = {r.get("fill_id"): r.get("ledger_key") for r in records
+                   if r.get("kind") == Kind.EVENT and r.get("event") == "reconcile_intent"}
+    keys: set[str] = set()
+    for r in records:
+        if (r.get("kind") == Kind.FILL and not r.get("orphan")
+                and not any(r.get(f) for f in _NOT_IN_LEDGER_FLAGS)):
+            keys.add(r.get("approval_id"))
+        elif r.get("kind") == Kind.RECONCILE:
+            # Operator reconcile: the row sits under the key its intent chose.
+            keys.add(intent_keys.get(r.get("fill_id")))
+    return {k for k in keys if isinstance(k, str)}
+
+
+def _ledger_missing_fills() -> int:
+    """How many audit-recorded fills are absent from the ledger (missing file,
+    zero-byte, restored from an older backup, rows deleted). Cost basis comes
+    from the ledger alone, so any such gap makes it untrustworthy. A fresh
+    install has no recorded fills and gets 0. Residual: blind if the audit
+    log is itself corrupted or deleted along with the ledger."""
+    landed = _landed_ledger_keys(AuditLog(AUDIT_PATH).records())
     if not landed:
-        return False
+        return 0
     if not LEDGER_PATH.exists():
-        return True
+        return len(landed)
     with Ledger(LEDGER_PATH) as ledger:
-        return not ledger.fills()
+        return len(landed - {f.approval_id for f in ledger.fills()})
 
 
 def cmd_check(payload: dict) -> int:
@@ -121,11 +135,13 @@ def cmd_check(payload: dict) -> int:
         if key in account:
             print(f"warning: payload account.{key} is ignored; cost basis is "
                   "read from the ledger", file=sys.stderr)
-    if intent.side == "buy" and _ledger_history_lost():
-        reason = ("ledger is missing or empty but the audit log records fills: "
-                  "cost basis cannot be trusted; restore data/ledger.db")
+    missing = _ledger_missing_fills() if intent.side == "buy" else 0
+    if missing:
+        reason = (f"{missing} recorded fill(s) are missing from the ledger "
+                  "(deleted, truncated or restored from an older backup): cost "
+                  "basis cannot be trusted; restore the current data/ledger.db")
         AuditLog(AUDIT_PATH).log_event("ledger_history_lost", {
-            "sleeve": intent.sleeve, "ticker": intent.ticker})
+            "sleeve": intent.sleeve, "ticker": intent.ticker, "missing": missing})
         _emit({"approved": False, "approval_id": None, "requires_confirm": False,
                "decisions": [{"gate": "ledger_integrity", "passed": False,
                               "reason": reason}]})

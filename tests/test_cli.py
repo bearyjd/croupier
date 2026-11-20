@@ -1571,3 +1571,90 @@ def test_corrupt_ledger_still_raises(workspace, monkeypatch, capsys):
     observed_health.save(DataHealth.FRESH)
     with pytest.raises(sqlite3.DatabaseError):
         cli.main(["check"])
+
+
+def _fill_once(monkeypatch, capsys, qty):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": verdict["approval_id"], "ticker": "ACME",
+        "side": "buy", "qty": qty, "price": 2.79})
+
+
+def _three_fills_with_backup(workspace, monkeypatch, capsys):
+    """Three recorded fills; returns a copy of the ledger taken after the first."""
+    _fill_once(monkeypatch, capsys, 10)
+    backup = workspace / "ledger.backup.db"
+    shutil.copy(workspace / "data" / "ledger.db", backup)
+    _fill_once(monkeypatch, capsys, 11)
+    _fill_once(monkeypatch, capsys, 12)
+    return backup
+
+
+def test_buy_blocked_when_ledger_restored_from_an_older_backup(
+        workspace, monkeypatch, capsys):
+    backup = _three_fills_with_backup(workspace, monkeypatch, capsys)
+    shutil.copy(backup, workspace / "data" / "ledger.db")
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 1 and not verdict["approved"]
+    gate = verdict["decisions"][0]
+    assert gate["gate"] == "ledger_integrity" and "2 recorded fill" in gate["reason"]
+
+
+def test_buy_blocked_when_all_but_one_fill_deleted_from_ledger(
+        workspace, monkeypatch, capsys):
+    _three_fills_with_backup(workspace, monkeypatch, capsys)
+    conn = sqlite3.connect(workspace / "data" / "ledger.db")
+    conn.execute("DELETE FROM fills WHERE rowid > 1")
+    conn.commit()
+    conn.close()
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 1 and verdict["decisions"][0]["gate"] == "ledger_integrity"
+
+
+def test_buy_allowed_when_ledger_restore_contains_every_recorded_fill(
+        workspace, monkeypatch, capsys):
+    _three_fills_with_backup(workspace, monkeypatch, capsys)
+    full = workspace / "ledger.full.db"
+    shutil.copy(workspace / "data" / "ledger.db", full)
+    (workspace / "data" / "ledger.db").unlink()
+    shutil.copy(full, workspace / "data" / "ledger.db")
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 0 and verdict["approved"]
+
+
+def test_ledger_extra_rows_beyond_the_audit_log_do_not_block(
+        workspace, monkeypatch, capsys):
+    # An operator-seeded or imported row has no audit fill: only fills the
+    # audit log says landed must be present, not the reverse.
+    _fill_once(monkeypatch, capsys, 10)
+    _seed_buy(workspace, "event_driven", "OTHER", 1, 1.0)
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 0 and verdict["approved"]
+
+
+def test_operator_reconcile_in_audit_counts_as_landed_in_ledger(
+        workspace, monkeypatch, capsys):
+    # `reconcile` puts a refused fill into the ledger under the key its
+    # reconcile_intent event chose, then logs a reconcile record. If that row
+    # is later missing from the ledger the buy must be blocked.
+    _fill_once(monkeypatch, capsys, 10)
+    log = AuditLog(workspace / "data" / "audit.jsonl")
+    log.log_event("reconcile_intent", {"fill_id": "h1", "ledger_key": "reconcile:h1"})
+    log.log_reconcile("h1", "gone", "event_driven", "ACME", "buy", 5, 2.0, "broker")
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 1 and verdict["decisions"][0]["gate"] == "ledger_integrity"
+    with Ledger(workspace / "data" / "ledger.db") as led:
+        led.record_fill(new_fill("reconcile:h1", "event_driven", "ACME", "buy", 5, 2.0))
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 0 and verdict["approved"]
+
+
+def test_sell_is_not_stopped_by_the_ledger_integrity_guard(
+        workspace, monkeypatch, capsys):
+    # The guard covers buys only (they are what a lost ledger over-approves).
+    # A sell is left to the holdings gate, which blocks it on the empty ledger.
+    _audit_has_landed_fill(workspace, monkeypatch, capsys)
+    (workspace / "data" / "ledger.db").unlink()
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order(side="sell", qty=1))
+    gates = {d["gate"] for d in verdict["decisions"]}
+    assert "ledger_integrity" not in gates and not verdict["approved"]
