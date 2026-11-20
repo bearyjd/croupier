@@ -1406,3 +1406,48 @@ def test_journal_exit_code_reflects_snapshot_ledger_mismatch(
     _seed_snapshot(workspace, 5000.0)
     assert cli.main(["journal"]) == 1
     assert "Snapshot vs ledger" in capsys.readouterr().out
+
+
+def _seed_buy(workspace, ticker="ACME", qty=1000.0, price=2.0, sleeve="event_driven"):
+    with Ledger(workspace / "data" / "ledger.db") as led:
+        led.record_fill(new_fill("seed", sleeve, ticker, "buy", qty, price))
+
+
+def test_check_uses_ledger_cost_basis_over_understated_agent_snapshot(
+        workspace, monkeypatch, capsys):
+    (workspace / "data").mkdir(exist_ok=True)
+    _seed_buy(workspace, qty=1000.0, price=100.0)     # $100k ledger basis in ACME
+    order = _order(account={"total_value": 100_000.0, "cash": 50_000.0,
+                            "sleeve_cost_basis": {}, "position_cost_basis": {}})
+    observed_health.save(DataHealth.FRESH)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(order)))
+    code = cli.main(["check"])
+    captured = capsys.readouterr()
+    verdict = json.loads(captured.out)
+    assert code == 1 and not verdict["approved"]
+    gates = {d["gate"]: d for d in verdict["decisions"]}
+    assert not gates["sleeve_budget"]["passed"]
+    assert not gates["position_cap"]["passed"]
+    assert "below the ledger" in captured.err
+
+
+def test_check_keeps_larger_agent_cost_basis(workspace, monkeypatch, capsys):
+    (workspace / "data").mkdir(exist_ok=True)
+    _seed_buy(workspace, qty=1.0, price=1.0)
+    order = _order(account={"total_value": 100_000.0, "cash": 50_000.0,
+                            "sleeve_cost_basis": {"event_driven": 99_000.0},
+                            "position_cost_basis": {"acme": 99_000.0}})
+    code, verdict = _run(monkeypatch, capsys, ["check"], order)
+    assert code == 1 and not verdict["approved"]
+
+
+def test_check_ignores_payload_is_etf_for_etf_only_denylist(
+        workspace, monkeypatch, capsys):
+    pol = workspace / "config" / "policy.yaml"
+    pol.write_text(pol.read_text().replace("denylist: {}", "denylist:\n  ACME: etf_only", 1))
+    observed_health.save(DataHealth.FRESH)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_order(is_etf=True))))
+    code = cli.main(["check"])
+    captured = capsys.readouterr()
+    assert code == 1 and not json.loads(captured.out)["approved"]
+    assert "is_etf is ignored" in captured.err

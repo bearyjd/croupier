@@ -57,6 +57,9 @@ class PolicyConfig:
     min_price_for_market_orders: float = 10.0
     min_adv_shares: float = 1_000_000
     execution_venue: str = "robinhood"
+    # Tickers policy vouches are ETFs. The agent's own `is_etf` claim is never
+    # trusted: an ETF_ONLY denylist entry passes only for a ticker listed here.
+    etf_tickers: frozenset[str] = frozenset()
 
 
 def _deny_gate(intent: OrderIntent, cfg: PolicyConfig) -> GateDecision:
@@ -66,7 +69,7 @@ def _deny_gate(intent: OrderIntent, cfg: PolicyConfig) -> GateDecision:
         level = cfg.sector_denylist.get(sector) if sector else None
     if level is None:
         return GateDecision("denylist", True, "not on restricted-list denylist")
-    if level == DenyLevel.ETF_ONLY and intent.is_etf:
+    if level == DenyLevel.ETF_ONLY and intent.ticker.upper() in cfg.etf_tickers:
         return GateDecision("denylist", True, "sector is ETF_ONLY; instrument is an ETF")
     return GateDecision("denylist", False,
                         f"restricted-list denylist: {intent.ticker} is {level} (deny wins)")
