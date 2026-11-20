@@ -80,6 +80,7 @@ def load(policy_path: str | Path = DEFAULT_POLICY_PATH,
         min_price_for_market_orders=raw.get("min_price_for_market_orders", 10.0),
         min_adv_shares=raw.get("min_adv_shares", 1_000_000),
         execution_venue=raw.get("execution_venue", "robinhood"),
+        etf_tickers=frozenset(str(t).upper() for t in (raw.get("etf_tickers") or [])),
     )
     state = SleeveState.load(state_path)
     token_path = Path(

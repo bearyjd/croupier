@@ -67,12 +67,44 @@ def _reject_nonfinite(literal: str) -> float:
     raise ValueError(f"non-finite number {literal} is not accepted")
 
 
+def _ledger_backed_snapshot(snap: AccountSnapshot, intent: OrderIntent) -> AccountSnapshot:
+    """The gate snapshot with cost bases never below the ledger's own.
+
+    The agent's reported basis feeds the budget and position gates, so an
+    understated figure would wave through an oversized buy. Take the larger of
+    reported and ledger, and warn when the agent understated. Does not create
+    the ledger file if there is none."""
+    if not LEDGER_PATH.exists():
+        return snap
+    by_sleeve: dict[str, float] = {}
+    by_ticker: dict[str, float] = {}
+    with Ledger(LEDGER_PATH) as ledger:
+        for p in ledger.positions():
+            by_sleeve[p.sleeve] = by_sleeve.get(p.sleeve, 0.0) + p.cost_basis
+            by_ticker[p.ticker.upper()] = by_ticker.get(p.ticker.upper(), 0.0) + p.cost_basis
+    sleeve = dict(snap.sleeve_cost_basis)
+    ticker: dict[str, float] = {}
+    for k, v in snap.position_cost_basis.items():
+        ticker[k.upper()] = ticker.get(k.upper(), 0.0) + v
+    for label, reported, ledger_vals, key in (
+            ("sleeve_cost_basis", sleeve, by_sleeve, intent.sleeve),
+            ("position_cost_basis", ticker, by_ticker, intent.ticker.upper())):
+        led = ledger_vals.get(key, 0.0)
+        if led > reported.get(key, 0.0) + 1e-9:
+            print(f"warning: {label}[{key}] reported {reported.get(key, 0.0):,.2f} "
+                  f"is below the ledger's {led:,.2f}; using the ledger",
+                  file=sys.stderr)
+            reported[key] = led
+    return AccountSnapshot(total_value=snap.total_value, cash=snap.cash,
+                           sleeve_cost_basis=sleeve, position_cost_basis=ticker)
+
+
 def cmd_check(payload: dict) -> int:
     intent = OrderIntent(
         sleeve=payload["sleeve"], ticker=payload["ticker"], side=payload["side"],
         qty=payload["qty"], limit_price=payload["limit_price"],
         signal_refs=tuple(payload.get("signal_refs", [])),
-        thesis=payload.get("thesis", ""), is_etf=payload.get("is_etf", False),
+        thesis=payload.get("thesis", ""),
         venue=payload.get("venue", "robinhood"),
         adv_shares=payload.get("adv_shares"),
     )
@@ -83,6 +115,10 @@ def cmd_check(payload: dict) -> int:
         position_cost_basis=payload["account"].get("position_cost_basis", {}),
     )
     policy = load_full_policy()
+    if payload.get("is_etf") and intent.ticker.upper() not in policy.config.etf_tickers:
+        print("warning: payload is_etf is ignored; ETF status comes from "
+              "policy etf_tickers", file=sys.stderr)
+    snap = _ledger_backed_snapshot(snap, intent)
     # Held quantity comes from Croupier's own ledger, never from the agent's
     # snapshot: the whole point of the holdings gate is to catch an agent
     # that has miscounted its position, so its own count cannot be the
