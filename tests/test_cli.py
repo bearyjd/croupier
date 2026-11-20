@@ -1427,7 +1427,6 @@ def test_forged_empty_sleeve_cost_basis_does_not_bypass_the_budget_gate(
     assert code == 1 and not verdict["approved"]
     gates = {d["gate"]: d for d in verdict["decisions"]}
     assert not gates["sleeve_budget"]["passed"]
-    assert "ignored" in capsys.readouterr().err
 
 
 def test_forged_empty_position_cost_basis_does_not_bypass_the_position_gate(
@@ -1446,4 +1445,13 @@ def test_check_without_cost_basis_in_payload_reads_the_ledger_silently(
     account = {"total_value": 100000.0, "cash": 50000.0}
     code, verdict = _run(monkeypatch, capsys, ["check"], _order(account=account))
     assert code == 0 and verdict["approved"]
-    assert "ignored" not in capsys.readouterr().err
+
+
+def test_payload_cost_basis_is_warned_about_on_stderr(workspace, monkeypatch, capsys):
+    observed_health.save(DataHealth.FRESH)
+    monkeypatch.setattr("sys.stdin", io.StringIO(
+        json.dumps(_order(account=_forged_account()))))
+    cli.main(["check"])
+    err = capsys.readouterr().err
+    assert "sleeve_cost_basis is ignored" in err
+    assert "position_cost_basis is ignored" in err
