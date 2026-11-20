@@ -50,6 +50,9 @@ class FillRecord(TypedDict, total=False):
     refused: bool
     implausible: bool
     bad_approval_id: bool
+    price_above_limit: bool
+    price_below_limit: bool
+    price_better_than_limit: bool
 
 
 class AckFillRecord(TypedDict):

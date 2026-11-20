@@ -6,12 +6,16 @@ from typing import get_type_hints
 from croupier import audit_schema as s
 from croupier.audit import AuditLog
 from croupier.catalysts import CatalystCalendar
+from croupier.journal import _PROBLEMS
 from croupier.gates.pipeline import PolicyConfig, SleeveConfig
 from croupier.models import AccountSnapshot, Mode, OrderIntent
 
 
 def _keys(td) -> set[str]:
     return set(get_type_hints(td))
+
+
+_FLAGS = tuple(k for k, _ in _PROBLEMS if k != "orphan") + ("bad_approval_id",)
 
 
 def _write_all(log: AuditLog) -> None:
@@ -24,7 +28,7 @@ def _write_all(log: AuditLog) -> None:
     log.check_and_log(intent, cfg, AccountSnapshot(100_000.0, 50_000.0),
                       calendar=CatalystCalendar.empty())
     log.log_fill("a1", "ACME", "buy", 1.0, 2.0, sleeve="event_driven",
-                 flags=("overfill", "refused"))
+                 flags=_FLAGS)
     log.log_ack_fill("a1", "ok", handle="h")
     log.log_reconcile("f1", "a1", "event_driven", "ACME", "buy", 1.0, 2.0, "r")
     log.log_decline("a1", "no")
@@ -49,3 +53,8 @@ def test_kind_constants_are_the_on_disk_strings():
     assert {s.Kind.CHECK, s.Kind.FILL, s.Kind.ACK_FILL, s.Kind.RECONCILE,
             s.Kind.DECLINE, s.Kind.EVENT} == set(s.RECORD_TYPES)
     assert s.Kind.ACK_FILL == "ack_fill"
+
+
+def test_every_journal_problem_key_is_declared_on_fill_record():
+    assert {k for k, _ in _PROBLEMS} <= _keys(s.FillRecord)
+
