@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from croupier.audit import AuditLog, valid_approval_id
+from croupier.audit_schema import Kind
 from croupier.data import observed_health
 from croupier.data.factory import build_router
 from croupier.journal import JOURNAL_DIR
@@ -279,7 +280,7 @@ def _refuse(log: AuditLog, fill, flags: tuple[str, ...], error: str) -> int:
     """Refuse a fill. Reporting the identical refused fill again is a replay:
     answer the same, but do not add a second Needs-action entry."""
     seen = any(
-        r.get("kind") == "fill" and r.get("refused")
+        r.get("kind") == Kind.FILL and r.get("refused")
         and r.get("approval_id") == fill.approval_id
         and r.get("ticker", "").upper() == fill.ticker and r.get("side") == fill.side
         and r.get("qty") == fill.qty and r.get("price") == fill.price
@@ -295,7 +296,7 @@ def _fill_flags(log: AuditLog, approval_id: str, intent: dict,
                 fill) -> tuple[tuple[str, ...], list[str]]:
     flags, warnings = [], []
     qty, price = fill.qty, fill.price
-    if any(r.get("kind") == "decline" and r.get("approval_id") == approval_id
+    if any(r.get("kind") == Kind.DECLINE and r.get("approval_id") == approval_id
            for r in log.records()):
         flags.append("fill_after_decline")
         warnings.append(f"fill after decline: approval {approval_id} was declined "
@@ -416,7 +417,7 @@ def cmd_reconcile(handle: str, qty: float, price: float, reason: str,
         return 1
     log = AuditLog(AUDIT_PATH)
     rec = next((r for r in log.records()
-                if r.get("kind") == "fill" and r.get("fill_id") == handle), None)
+                if r.get("kind") == Kind.FILL and r.get("fill_id") == handle), None)
     if rec is None:
         _emit({"logged": False, "error": f"unknown fill handle {handle!r}"})
         return 1
@@ -454,7 +455,7 @@ def cmd_reconcile(handle: str, qty: float, price: float, reason: str,
         return 1
     with _reconcile_lock(), Ledger(LEDGER_PATH) as ledger:
         intent_key = next((r.get("ledger_key") for r in log.records()
-                           if r.get("kind") == "event" and r.get("event") == "reconcile_intent"
+                           if r.get("kind") == Kind.EVENT and r.get("event") == "reconcile_intent"
                            and r.get("fill_id") == handle), None)
         held = {f.approval_id: f for f in ledger.fills()}
         if intent_key is not None:
