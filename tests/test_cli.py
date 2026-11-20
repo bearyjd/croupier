@@ -1406,3 +1406,44 @@ def test_journal_exit_code_reflects_snapshot_ledger_mismatch(
     _seed_snapshot(workspace, 5000.0)
     assert cli.main(["journal"]) == 1
     assert "Snapshot vs ledger" in capsys.readouterr().out
+
+
+def _seed_buy(workspace, sleeve, ticker, qty, price):
+    with Ledger(workspace / "data" / "ledger.db") as led:
+        led.record_fill(new_fill(f"seed-{sleeve}-{ticker}", sleeve, ticker, "buy", qty, price))
+
+
+def _forged_account(**kw):
+    return {"total_value": 100000.0, "cash": 50000.0,
+            "sleeve_cost_basis": {"event_driven": 0.0}, "position_cost_basis": {}, **kw}
+
+
+def test_forged_empty_sleeve_cost_basis_does_not_bypass_the_budget_gate(
+        workspace, monkeypatch, capsys):
+    # 10% ceiling = $10,000; $9,000 already deployed in the ledger.
+    _seed_buy(workspace, "event_driven", "OTHER", 900, 10.0)
+    code, verdict = _run(monkeypatch, capsys, ["check"],
+                         _order(qty=600, limit_price=2.0, account=_forged_account()))
+    assert code == 1 and not verdict["approved"]
+    gates = {d["gate"]: d for d in verdict["decisions"]}
+    assert not gates["sleeve_budget"]["passed"]
+    assert "ignored" in capsys.readouterr().err
+
+
+def test_forged_empty_position_cost_basis_does_not_bypass_the_position_gate(
+        workspace, monkeypatch, capsys):
+    # 3% cap = $3,000; $2,900 of ACME already held in the ledger.
+    _seed_buy(workspace, "event_driven", "ACME", 100, 29.0)
+    code, verdict = _run(monkeypatch, capsys, ["check"],
+                         _order(qty=100, limit_price=2.0, account=_forged_account()))
+    assert code == 1 and not verdict["approved"]
+    gates = {d["gate"]: d for d in verdict["decisions"]}
+    assert not gates["position_cap"]["passed"]
+
+
+def test_check_without_cost_basis_in_payload_reads_the_ledger_silently(
+        workspace, monkeypatch, capsys):
+    account = {"total_value": 100000.0, "cash": 50000.0}
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order(account=account))
+    assert code == 0 and verdict["approved"]
+    assert "ignored" not in capsys.readouterr().err

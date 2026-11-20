@@ -67,6 +67,20 @@ def _reject_nonfinite(literal: str) -> float:
     raise ValueError(f"non-finite number {literal} is not accepted")
 
 
+def _ledger_cost_basis(intent: OrderIntent) -> tuple[dict[str, float], dict[str, float]]:
+    """(sleeve cost basis, per-ticker cost basis) for the buy gates, from the
+    ledger. Sells skip both gates, and a missing ledger file is not created."""
+    if intent.side != "buy" or not LEDGER_PATH.exists():
+        return {}, {}
+    ticker = intent.ticker.upper()
+    with Ledger(LEDGER_PATH) as ledger:
+        positions = ledger.positions()
+    sleeve = sum(p.cost_basis for p in positions if p.sleeve == intent.sleeve)
+    # Account-wide for the ticker: the cap bounds exposure to one name.
+    held = sum(p.cost_basis for p in positions if p.ticker == ticker)
+    return {intent.sleeve: sleeve}, {ticker: held}
+
+
 def cmd_check(payload: dict) -> int:
     intent = OrderIntent(
         sleeve=payload["sleeve"], ticker=payload["ticker"], side=payload["side"],
@@ -76,11 +90,21 @@ def cmd_check(payload: dict) -> int:
         venue=payload.get("venue", "robinhood"),
         adv_shares=payload.get("adv_shares"),
     )
+    # Cost basis feeds the budget and position gates, so it comes from the
+    # ledger, never the caller: an agent reporting an empty basis would
+    # otherwise see every buy pass. total_value and cash remain caller-supplied
+    # (broker data Croupier cannot derive; see README "account").
+    account = payload["account"]
+    for key in ("sleeve_cost_basis", "position_cost_basis"):
+        if key in account:
+            print(f"warning: payload account.{key} is ignored; cost basis is "
+                  "read from the ledger", file=sys.stderr)
+    sleeve_cost_basis, position_cost_basis = _ledger_cost_basis(intent)
     snap = AccountSnapshot(
-        total_value=payload["account"]["total_value"],
-        cash=payload["account"]["cash"],
-        sleeve_cost_basis=payload["account"].get("sleeve_cost_basis", {}),
-        position_cost_basis=payload["account"].get("position_cost_basis", {}),
+        total_value=account["total_value"],
+        cash=account["cash"],
+        sleeve_cost_basis=sleeve_cost_basis,
+        position_cost_basis=position_cost_basis,
     )
     policy = load_full_policy()
     # Held quantity comes from Croupier's own ledger, never from the agent's
