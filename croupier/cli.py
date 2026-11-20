@@ -82,6 +82,27 @@ def _ledger_cost_basis(intent: OrderIntent) -> tuple[dict[str, float], dict[str,
     return {intent.sleeve: sleeve}, {ticker: held}
 
 
+_NOT_IN_LEDGER_FLAGS = ("refused", "implausible", "bad_approval_id")
+
+
+def _ledger_history_lost() -> bool:
+    """True when the audit log holds fills that reached the ledger but the
+    ledger has none (file missing, zero-byte, or emptied). Zero deployed
+    capital would then pass every buy, so the caller blocks buys. A fresh
+    install has no such fills and is unaffected."""
+    landed = any(
+        (r.get("kind") == Kind.FILL and not r.get("orphan")
+         and not any(r.get(f) for f in _NOT_IN_LEDGER_FLAGS))
+        or (r.get("kind") == Kind.RECONCILE and r.get("inserted"))
+        for r in AuditLog(AUDIT_PATH).records())
+    if not landed:
+        return False
+    if not LEDGER_PATH.exists():
+        return True
+    with Ledger(LEDGER_PATH) as ledger:
+        return not ledger.fills()
+
+
 def cmd_check(payload: dict) -> int:
     intent = OrderIntent(
         sleeve=payload["sleeve"], ticker=payload["ticker"], side=payload["side"],
@@ -100,7 +121,21 @@ def cmd_check(payload: dict) -> int:
         if key in account:
             print(f"warning: payload account.{key} is ignored; cost basis is "
                   "read from the ledger", file=sys.stderr)
+    if intent.side == "buy" and _ledger_history_lost():
+        reason = ("ledger is missing or empty but the audit log records fills: "
+                  "cost basis cannot be trusted; restore data/ledger.db")
+        AuditLog(AUDIT_PATH).log_event("ledger_history_lost", {
+            "sleeve": intent.sleeve, "ticker": intent.ticker})
+        _emit({"approved": False, "approval_id": None, "requires_confirm": False,
+               "decisions": [{"gate": "ledger_integrity", "passed": False,
+                              "reason": reason}]})
+        return 1
     sleeve_cost_basis, position_cost_basis = _ledger_cost_basis(intent)
+    # The caller's claim is kept for reconciliation (#32), never gated on.
+    reported = ({k: account.get(k, {}) for k in
+                 ("sleeve_cost_basis", "position_cost_basis")}
+                if any(k in account for k in
+                       ("sleeve_cost_basis", "position_cost_basis")) else None)
     snap = AccountSnapshot(
         total_value=account["total_value"],
         cash=account["cash"],
@@ -142,6 +177,7 @@ def cmd_check(payload: dict) -> int:
         observed_health.load(),
         calendar=policy.catalysts,
         held_qty=held_qty,
+        reported_cost_basis=reported,
     )
     _emit({
         "approved": verdict.approved,

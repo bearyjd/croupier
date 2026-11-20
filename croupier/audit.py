@@ -82,7 +82,8 @@ class AuditLog:
                       data_health: DataHealth = DataHealth.FRESH,
                       calendar: CatalystCalendar | None = None,
                       today: date | None = None,
-                      held_qty: float | None = None) -> Verdict:
+                      held_qty: float | None = None,
+                      reported_cost_basis: Mapping | None = None) -> Verdict:
         verdict = check(intent, cfg, snap, auto_spent_today, data_health,
                         calendar=calendar, today=today, held_qty=held_qty)
         record: CheckRecord = {
@@ -98,6 +99,11 @@ class AuditLog:
             "approval_id": verdict.approval_id,
             "requires_confirm": verdict.requires_confirm,
         }
+        if reported_cost_basis is not None:
+            # What the caller claimed, for reconciliation only; never gated on.
+            record["reported_cost_basis"] = {
+                k: dict(reported_cost_basis.get(k) or {})
+                for k in ("sleeve_cost_basis", "position_cost_basis")}
         self._append(record)
         return verdict
 

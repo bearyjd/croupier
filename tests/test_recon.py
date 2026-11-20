@@ -25,11 +25,13 @@ def _pos(sleeve, ticker, qty, basis):
 
 def _snap(sleeves=None, positions=None, ts="2026-08-28T10:00:00+00:00"):
     snap = {"total_value": 100_000.0, "cash": 1.0}
+    reported = {}
     if sleeves is not None:
-        snap["sleeve_cost_basis"] = sleeves
+        reported["sleeve_cost_basis"] = sleeves
     if positions is not None:
-        snap["position_cost_basis"] = positions
-    return {"ts": ts, "kind": "check", "snapshot": snap}
+        reported["position_cost_basis"] = positions
+    return {"ts": ts, "kind": "check", "snapshot": snap,
+            "reported_cost_basis": reported}
 
 
 def test_match_has_no_discrepancies():
@@ -85,7 +87,7 @@ def test_old_record_without_basis_fields_is_not_checked():
     assert not out.checked and out.ok
 
 
-def test_check_and_log_persists_basis_fields(tmp_path):
+def test_check_and_log_persists_reported_basis_apart_from_gating_basis(tmp_path):
     from croupier.gates.pipeline import PolicyConfig as PC
     log = AuditLog(tmp_path / "audit.jsonl")
     cfg = PC(sleeves={"event_driven": SleeveConfig("event_driven", 10, 3, mode=Mode.CONFIRM)},
@@ -95,10 +97,12 @@ def test_check_and_log_persists_basis_fields(tmp_path):
     snap = AccountSnapshot(total_value=100_000.0, cash=5.0,
                            sleeve_cost_basis={"event_driven": 10.0},
                            position_cost_basis={"ACME": 10.0})
-    log.check_and_log(intent, cfg, snap)
-    rec = log.records()[-1]["snapshot"]
-    assert rec["sleeve_cost_basis"] == {"event_driven": 10.0}
-    assert rec["position_cost_basis"] == {"ACME": 10.0}
+    reported = {"sleeve_cost_basis": {"event_driven": 7.0},
+                "position_cost_basis": {"ACME": 7.0, "OTHER": 1.0}}
+    log.check_and_log(intent, cfg, snap, reported_cost_basis=reported)
+    rec = log.records()[-1]
+    assert rec["snapshot"]["sleeve_cost_basis"] == {"event_driven": 10.0}
+    assert rec["reported_cost_basis"] == reported
 
 
 def _policy(tmp_path):

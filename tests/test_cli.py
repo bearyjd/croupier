@@ -4,6 +4,7 @@
 import io
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -1386,9 +1387,9 @@ def _seed_snapshot(workspace, basis):
     """A logged check whose snapshot reports `basis` for ACME, no fills."""
     AuditLog(workspace / "data" / "audit.jsonl")._append({
         "ts": "2026-08-28T10:00:00+00:00", "kind": "check",
-        "snapshot": {"total_value": 100_000.0, "cash": 1.0,
-                     "sleeve_cost_basis": {"event_driven": basis},
-                     "position_cost_basis": {"ACME": basis}}})
+        "snapshot": {"total_value": 100_000.0, "cash": 1.0},
+        "reported_cost_basis": {"sleeve_cost_basis": {"event_driven": basis},
+                                "position_cost_basis": {"ACME": basis}}})
 
 
 def test_recon_command_exits_nonzero_on_snapshot_ledger_mismatch(
@@ -1490,3 +1491,83 @@ def test_check_ignores_payload_is_etf_for_etf_only_denylist(
     captured = capsys.readouterr()
     assert code == 1 and not json.loads(captured.out)["approved"]
     assert "is_etf is ignored" in captured.err
+
+
+def _audit_records(workspace):
+    return [json.loads(line) for line in
+            (workspace / "data" / "audit.jsonl").read_text().splitlines() if line]
+
+
+def _recon(workspace):
+    from croupier.audit import AuditLog
+    from croupier.recon import reconcile_ledger
+    with Ledger(workspace / "data" / "ledger.db") as led:
+        return reconcile_ledger(AuditLog(workspace / "data" / "audit.jsonl"), led)
+
+
+def test_reported_cost_basis_is_audited_and_recon_detects_divergence(
+        workspace, monkeypatch, capsys):
+    _seed_buy(workspace, "event_driven", "OTHER", 290, 10.0)   # ledger: $2,900
+    account = _forged_account(sleeve_cost_basis={"event_driven": 50_000.0},
+                              position_cost_basis={"OTHER": 50_000.0})
+    _run(monkeypatch, capsys, ["check"], _order(account=account))
+    rec = _audit_records(workspace)[-1]
+    assert rec["reported_cost_basis"]["sleeve_cost_basis"] == {"event_driven": 50_000.0}
+    report = _recon(workspace)
+    assert report.checked and not report.ok
+
+
+def test_honest_snapshot_reconciles_even_for_a_sell_or_other_ticker(
+        workspace, monkeypatch, capsys):
+    _seed_buy(workspace, "event_driven", "OTHER", 290, 10.0)
+    account = _forged_account(sleeve_cost_basis={"event_driven": 2_900.0},
+                              position_cost_basis={"OTHER": 2_900.0})
+    _run(monkeypatch, capsys, ["check"], _order(account=account))      # buy ACME
+    assert _recon(workspace).ok
+    _run(monkeypatch, capsys, ["check"], _order(side="sell", qty=1, account=account))
+    assert _recon(workspace).ok
+
+
+def _audit_has_landed_fill(workspace, monkeypatch, capsys):
+    _, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": verdict["approval_id"], "ticker": "ACME",
+        "side": "buy", "qty": 10, "price": 2.79})
+
+
+def test_buy_blocked_when_ledger_missing_but_audit_has_fills(
+        workspace, monkeypatch, capsys):
+    _audit_has_landed_fill(workspace, monkeypatch, capsys)
+    (workspace / "data" / "ledger.db").unlink()
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 1 and not verdict["approved"]
+    assert "ledger" in verdict["decisions"][0]["reason"].lower()
+
+
+def test_buy_blocked_when_ledger_is_zero_byte_but_audit_has_fills(
+        workspace, monkeypatch, capsys):
+    _audit_has_landed_fill(workspace, monkeypatch, capsys)
+    (workspace / "data" / "ledger.db").write_bytes(b"")
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 1 and not verdict["approved"]
+
+
+def test_fresh_install_first_buy_is_allowed(workspace, monkeypatch, capsys):
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 0 and verdict["approved"]
+
+
+def test_orphan_audit_fill_does_not_block_a_buy(workspace, monkeypatch, capsys):
+    _run(monkeypatch, capsys, ["fill"], {
+        "approval_id": "nope", "ticker": "ACME", "side": "buy", "qty": 1, "price": 1.0})
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order())
+    assert code == 0 and verdict["approved"]
+
+
+def test_corrupt_ledger_still_raises(workspace, monkeypatch, capsys):
+    (workspace / "data").mkdir(exist_ok=True)
+    (workspace / "data" / "ledger.db").write_bytes(b"not a sqlite database" * 50)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_order())))
+    observed_health.save(DataHealth.FRESH)
+    with pytest.raises(sqlite3.DatabaseError):
+        cli.main(["check"])

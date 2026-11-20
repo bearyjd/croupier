@@ -67,8 +67,10 @@ def _numeric(raw: object) -> dict[str, float]:
 def reconcile_snapshot(record: Mapping | None, positions: Iterable[Position],
                        tolerance_usd: float = TOLERANCE_USD,
                        tolerance_pct: float = TOLERANCE_PCT) -> ReconReport:
-    """``record`` is the latest ``check`` audit record, or None."""
-    snap = (record or {}).get("snapshot")
+    """``record`` is the latest ``check`` audit record, or None. Compares the
+    caller-reported cost basis (``reported_cost_basis``), never the gating
+    basis in ``snapshot``, which is derived from the ledger itself."""
+    snap = (record or {}).get("reported_cost_basis")
     if (not isinstance(snap, Mapping) or "sleeve_cost_basis" not in snap
             or "position_cost_basis" not in snap):
         return ReconReport(checked=False)
@@ -119,6 +121,8 @@ def latest_check_record(records: Iterable[Mapping]) -> Mapping | None:
 def reconcile_ledger(audit: AuditLog, ledger: Ledger) -> ReconReport:
     """Latest snapshot against the ledger as it stood at the snapshot's time,
     so a fill recorded after the snapshot is not a false discrepancy."""
-    record = latest_check_record(audit.records())
+    record = latest_check_record(
+        r for r in audit.records()
+        if isinstance(r.get("reported_cost_basis"), Mapping))
     as_of = parse_ts(record.get("ts")) if record else None
     return reconcile_snapshot(record, ledger.positions(as_of))
