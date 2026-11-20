@@ -1455,3 +1455,38 @@ def test_payload_cost_basis_is_warned_about_on_stderr(workspace, monkeypatch, ca
     err = capsys.readouterr().err
     assert "sleeve_cost_basis is ignored" in err
     assert "position_cost_basis is ignored" in err
+
+
+def test_larger_reported_cost_basis_is_ignored_and_ledger_wins(
+        workspace, monkeypatch, capsys):
+    # Ledger holds $1; the caller reports $99,000 (which max() would keep and
+    # then reject). Ledger-only: the tiny real basis lets the buy through.
+    _seed_buy(workspace, "event_driven", "ACME", 1, 1.0)
+    account = _forged_account(sleeve_cost_basis={"event_driven": 99_000.0},
+                              position_cost_basis={"ACME": 99_000.0})
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order(account=account))
+    assert code == 0 and verdict["approved"]
+
+
+def test_missing_ledger_means_zero_cost_basis_not_the_reported_one(
+        workspace, monkeypatch, capsys):
+    # No ledger file: nothing is deployed, so the reported figure is not used
+    # (and no ledger file is created by a check).
+    assert not (workspace / "data" / "ledger.db").exists()
+    account = _forged_account(sleeve_cost_basis={"event_driven": 99_000.0},
+                              position_cost_basis={"ACME": 99_000.0})
+    code, verdict = _run(monkeypatch, capsys, ["check"], _order(account=account))
+    assert code == 0 and verdict["approved"]
+    assert not (workspace / "data" / "ledger.db").exists()
+
+
+def test_check_ignores_payload_is_etf_for_etf_only_denylist(
+        workspace, monkeypatch, capsys):
+    pol = workspace / "config" / "policy.yaml"
+    pol.write_text(pol.read_text().replace("denylist: {}", "denylist:\n  ACME: etf_only", 1))
+    observed_health.save(DataHealth.FRESH)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_order(is_etf=True))))
+    code = cli.main(["check"])
+    captured = capsys.readouterr()
+    assert code == 1 and not json.loads(captured.out)["approved"]
+    assert "is_etf is ignored" in captured.err

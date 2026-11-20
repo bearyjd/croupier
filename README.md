@@ -109,12 +109,12 @@ for real intents:
 | `ticker`, `side`, `qty`, `limit_price` | the order; `side` is `buy`/`sell` |
 | `signal_refs` | **mandatory, non-empty** — public refs only (filing IDs, 8-K accession numbers, PR URLs). PRP-001 invariant 2 rejects an intent without them at construction time. |
 | `thesis` | one-line rationale, recorded in the audit log |
-| `is_etf` | lets an `etf_only` denylist entry pass |
+| `is_etf` | **ignored** (warns on stderr) — an `etf_only` denylist entry passes only for tickers listed in policy `etf_tickers` |
 | `venue` | must equal `execution_venue` in policy (`robinhood`) |
 | `adv_shares` | average daily volume, for the thin-liquidity flag |
 | `data_health` | **ignored** — the gate uses the health `croupier mark` last observed (`dead` if never marked) |
 | `auto_spent_today` | **ignored** (warns on stderr) — AUTO daily spend is the sleeve's gross filled buys today (UTC) in the ledger; sells do not reduce it, unfilled approvals are not counted |
-| `account` | Robinhood MCP snapshot: `total_value`, `cash`. `sleeve_cost_basis` / `position_cost_basis` are **ignored** (warns on stderr): both are derived from the ledger. Residual trust: `total_value` and `cash` are caller-supplied broker data; a forged `total_value` inflates the budget and position ceilings (cross-checked by the reconciliation in #32) |
+| `account` | Robinhood MCP snapshot: `total_value`, `cash`. `sleeve_cost_basis` / `position_cost_basis` are **ignored** (warns on stderr): both are derived from the ledger only (a larger reported figure is not kept either; no ledger file means zero deployed). Residual trust: `total_value` and `cash` are caller-supplied broker data; a forged `total_value` inflates the budget and position ceilings (cross-checked by the reconciliation in #32) |
 
 Every check — approved or not — appends a record to `data/audit.jsonl`
 and fsyncs it *before* the verdict is returned. No log write, no approval.

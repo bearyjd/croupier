@@ -34,6 +34,7 @@ sector_denylist: {}   # sector: no_trade | etf_only
 
 # Inline overrides. These win over the CSV: a hand-curated mapping is a
 # deliberate act and should outrank a generated file.
+etf_tickers: []      # tickers that may pass an etf_only denylist entry (agent's is_etf is ignored)
 ticker_sector: {}
 
 min_price_for_market_orders: 10.0

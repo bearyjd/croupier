@@ -46,10 +46,18 @@ def test_denylist_ticker_wins():
 
 def test_sector_etf_only_blocks_single_name_allows_etf():
     cfg = _cfg(sector_denylist={"defense": DenyLevel.ETF_ONLY},
-               ticker_sector={"ACME": "defense", "ETFX": "defense"})
+               ticker_sector={"ACME": "defense", "ETFX": "defense"},
+               etf_tickers=frozenset({"ETFX"}))
     assert not check(_intent(), cfg, _snap()).approved
-    v = check(_intent(ticker="ETFX", is_etf=True, limit_price=95.0, qty=10), cfg, _snap())
+    v = check(_intent(ticker="ETFX", limit_price=95.0, qty=10), cfg, _snap())
     assert v.approved
+
+
+def test_agent_is_etf_claim_cannot_bypass_etf_only_denylist():
+    cfg = _cfg(sector_denylist={"defense": DenyLevel.ETF_ONLY},
+               ticker_sector={"ACME": "defense"})   # ACME not in policy etf_tickers
+    v = check(_intent(is_etf=True), cfg, _snap())
+    assert not v.approved and "denylist" in v.rejection_reasons[0]
 
 
 def test_sleeve_budget_ceiling():
