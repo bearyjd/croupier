@@ -12,7 +12,7 @@ dependencies = [
     # Bounded pins: floors are the versions this repo is developed and CI-tested
     # against; major/minor caps keep `pip install -e .` reproducible over time.
     "pyyaml>=6.0,<7",
-    "httpx>=0.28,<0.29",   # required by croupier.data.stooq / croupier.data.schwab
+    "httpx>=0.29,<0.30",   # required by croupier.data.stooq / croupier.data.schwab
 ]
 
 [project.optional-dependencies]
